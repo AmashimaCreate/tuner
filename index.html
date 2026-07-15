@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8">
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    >
+    <meta name="theme-color" content="#090d12">
+    <title>ギターチューナー</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090d12;
+        --panel: #111923;
+        --panel-strong: #17202b;
+        --text: #f5f8fc;
+        --muted: #aebdcd;
+        --line: #344456;
+        --off: #5a6472;
+        --accent: #e8a33d;
+        --tuned: #34d399;
+        --danger: #ff9c9c;
+        --focus: #ffe08a;
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+      }
+
+      body {
+        min-height: 100svh;
+        color: var(--text);
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      button {
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 3px;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.62;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .app-shell {
+        width: min(100%, 620px);
+        height: 100vh;
+        height: 100dvh;
+        margin: 0 auto;
+        padding:
+          max(8px, env(safe-area-inset-top))
+          max(12px, env(safe-area-inset-right))
+          max(8px, env(safe-area-inset-bottom))
+          max(12px, env(safe-area-inset-left));
+        display: grid;
+        grid-template-rows: 44px minmax(0, 1fr) auto;
+        gap: 6px;
+      }
+
+      .app-header {
+        min-height: 44px;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) 44px;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .app-header h1 {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.7rem;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        white-space: nowrap;
+      }
+
+      .tuning-button {
+        min-width: 0;
+        min-height: 44px;
+        padding: 0 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 0.9rem;
+        font-weight: 750;
+      }
+
+      .tuning-button-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tuning-chevron {
+        flex: 0 0 auto;
+        color: var(--accent);
+        font-size: 0.82rem;
+      }
+
+      .icon-button {
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+      }
+
+      .icon-button svg {
+        width: 21px;
+        height: 21px;
+      }
+
+      .tuner-main {
+        --measure-color: var(--accent);
+        min-height: 0;
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: 150px minmax(154px, 1fr) auto;
+        gap: 4px;
+      }
+
+      .tuner-main[data-tuned="true"] {
+        --measure-color: var(--tuned);
+      }
+
+      .headstock-stage {
+        position: relative;
+        min-height: 0;
+        display: grid;
+        place-items: start center;
+        overflow: hidden;
+      }
+
+      .headstock {
+        position: relative;
+        display: block;
+        width: auto;
+        height: 100%;
+        max-width: 64vw;
+        max-height: 355px;
+        aspect-ratio: 941 / 1672;
+        overflow: visible;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .headstock-image {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+        user-select: none;
+        filter: drop-shadow(0 9px 14px rgb(0 0 0 / 38%));
+      }
+
+      .headstock-strings {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        display: block;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        pointer-events: none;
+      }
+
+      .string-line {
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        opacity: 0.72;
+        transition: stroke 100ms ease, opacity 100ms ease, stroke-width 100ms ease;
+      }
+
+      .string-line.is-wound {
+        stroke: #c58b59;
+      }
+
+      .string-line.is-plain {
+        stroke: #cbd2da;
+      }
+
+      .string-line[data-i="0"] { stroke-width: 2.1; }
+      .string-line[data-i="1"] { stroke-width: 1.85; }
+      .string-line[data-i="2"] { stroke-width: 1.6; }
+      .string-line[data-i="3"] { stroke-width: 1.35; }
+      .string-line[data-i="4"] { stroke-width: 1.15; }
+      .string-line[data-i="5"] { stroke-width: 1; }
+
+      .string-line.is-active {
+        stroke: var(--measure-color);
+        stroke-width: 2.5;
+        opacity: 1;
+        filter: drop-shadow(0 0 3px color-mix(in srgb, var(--measure-color) 64%, transparent));
+      }
+
+      .peg {
+        position: absolute;
+        z-index: 2;
+        width: 48px;
+        height: 48px;
+        padding: 0;
+        transform: translate(-50%, -50%);
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: #aeb8c4;
+        cursor: pointer;
+        outline: none;
+      }
+
+      .peg[aria-disabled="true"] {
+        cursor: default;
+        pointer-events: none;
+      }
+
+      .peg:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .peg-ring {
+        position: absolute;
+        inset: 3px;
+        border: 2px solid transparent;
+        border-radius: 50%;
+        transition: border-color 100ms ease, box-shadow 100ms ease;
+      }
+
+      .peg-label {
+        position: absolute;
+        top: 50%;
+        width: 44px;
+        height: 44px;
+        transform: translateY(-50%);
+        color: #aeb8c4;
+        border: 1px solid rgb(255 255 255 / 7%);
+        border-radius: 50%;
+        background: #292e37;
+        box-shadow: 0 5px 14px rgb(0 0 0 / 22%);
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 720;
+        line-height: 1;
+        text-align: center;
+        white-space: nowrap;
+        transition:
+          color 100ms ease,
+          border-color 100ms ease,
+          background 100ms ease,
+          box-shadow 100ms ease;
+        user-select: none;
+      }
+
+      .peg[data-side="left"] .peg-label {
+        right: calc(100% + 7px);
+      }
+
+      .peg[data-side="right"] .peg-label {
+        left: calc(100% + 7px);
+      }
+
+      .peg.is-active .peg-ring {
+        border-color: var(--measure-color);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--measure-color) 42%, transparent);
+      }
+
+      .peg.is-active .peg-label {
+        color: var(--measure-color);
+        border-color: var(--measure-color);
+        background: color-mix(in srgb, var(--measure-color) 10%, #292e37);
+        box-shadow: 0 0 14px color-mix(in srgb, var(--measure-color) 30%, transparent);
+        font-weight: 780;
+      }
+
+      .peg.is-manual .peg-ring {
+        border-width: 3px;
+      }
+
+      .peg[data-i="0"] { left: 16%; top: 54%; }
+      .peg[data-i="1"] { left: 16%; top: 38%; }
+      .peg[data-i="2"] { left: 16%; top: 22%; }
+      .peg[data-i="3"] { left: 84%; top: 22%; }
+      .peg[data-i="4"] { left: 84%; top: 38%; }
+      .peg[data-i="5"] { left: 84%; top: 54%; }
+
+      @media (max-height: 620px) {
+        .headstock {
+          height: 325px;
+          max-height: none;
+          transform: translateY(-20px);
+        }
+
+        .peg {
+          width: 44px;
+          height: 44px;
+        }
+      }
+
+      .gauge-stage {
+        height: 150px;
+        min-height: 0;
+        display: grid;
+        place-items: center;
+      }
+
+      .pitch-gauge {
+        width: min(100%, 280px);
+        height: 150px;
+        display: block;
+        overflow: visible;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .gauge-track {
+        fill: none;
+        stroke: rgb(255 255 255 / 7%);
+        stroke-width: 3;
+        stroke-linecap: round;
+      }
+
+      .gauge-deviation {
+        fill: none;
+        stroke: var(--measure-color);
+        stroke-width: 4;
+        stroke-linecap: round;
+      }
+
+      .gauge-marker {
+        fill: var(--measure-color);
+        filter: drop-shadow(0 0 5px color-mix(in srgb, var(--measure-color) 60%, transparent));
+      }
+
+      .gauge-readout {
+        fill: var(--measure-color);
+        text-anchor: middle;
+        transition: fill 100ms ease, opacity 120ms ease;
+      }
+
+      .tuner-main[data-signal="empty"] .gauge-readout {
+        fill: var(--off);
+      }
+
+      .gauge-note {
+        font-size: 44px;
+        font-weight: 760;
+        letter-spacing: -0.04em;
+      }
+
+      .gauge-octave {
+        font-size: 17px;
+        font-weight: 750;
+      }
+
+      .gauge-cents {
+        font-size: 15px;
+        font-weight: 720;
+      }
+
+      .gauge-tuned-text {
+        fill: var(--tuned);
+        font-size: 11px;
+        font-weight: 800;
+        text-anchor: middle;
+        letter-spacing: 0.04em;
+      }
+
+      .tuner-main[data-signal="dim"] .signal-dependent {
+        opacity: 0.35;
+      }
+
+      .debug-panel {
+        min-height: 70px;
+        padding: 4px 6px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 3px 6px;
+        color: var(--muted);
+        font-size: 0.56rem;
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .debug-item {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .debug-item b {
+        display: block;
+        color: var(--text);
+        font-weight: 700;
+      }
+
+      .controls {
+        display: grid;
+        gap: 6px;
+      }
+
+      .error-message {
+        min-height: 18px;
+        margin: 0;
+        overflow: hidden;
+        color: var(--danger);
+        font-size: 0.76rem;
+        font-weight: 650;
+        line-height: 18px;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mic-button {
+        width: 100%;
+        min-height: 58px;
+        border: 1px solid color-mix(in srgb, var(--accent) 72%, white);
+        border-radius: 14px;
+        background: var(--accent);
+        color: #1c1002;
+        font-size: 1rem;
+        font-weight: 850;
+        letter-spacing: 0.04em;
+        box-shadow: 0 7px 24px rgb(0 0 0 / 24%);
+      }
+
+      .mic-button[aria-pressed="true"] {
+        border-color: var(--line);
+        background: var(--panel-strong);
+        color: var(--text);
+        box-shadow: none;
+      }
+
+      .tuning-dialog {
+        width: min(92vw, 440px);
+        max-height: min(82dvh, 640px);
+        padding: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel-strong);
+        color: var(--text);
+        box-shadow: 0 24px 80px rgb(0 0 0 / 60%);
+      }
+
+      .tuning-dialog::backdrop {
+        background: rgb(0 0 0 / 72%);
+        backdrop-filter: blur(3px);
+      }
+
+      .dialog-shell {
+        max-height: min(82dvh, 640px);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .dialog-header {
+        min-height: 54px;
+        padding: 5px 7px 5px 16px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .dialog-header h2 {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 800;
+      }
+
+      .dialog-close {
+        width: 44px;
+        height: 44px;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 1.5rem;
+        line-height: 1;
+      }
+
+      .tuning-list {
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 8px;
+      }
+
+      .tuning-category {
+        margin: 0;
+        padding: 12px 10px 5px;
+        color: #8f9baa;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+      }
+
+      .tuning-option {
+        width: 100%;
+        min-height: 44px;
+        padding: 8px 11px;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        text-align: left;
+        font-size: 0.91rem;
+        font-weight: 660;
+      }
+
+      .tuning-option + .tuning-option {
+        margin-top: 2px;
+      }
+
+      .tuning-option[aria-checked="true"] {
+        background: rgb(52 211 153 / 13%);
+        color: var(--tuned);
+      }
+
+      .tuning-check {
+        flex: 0 0 auto;
+        color: var(--tuned);
+        font-weight: 900;
+      }
+
+      .settings-dialog {
+        width: min(92vw, 400px);
+      }
+
+      .settings-dialog .dialog-shell {
+        grid-template-rows: auto auto;
+      }
+
+      .settings-body {
+        padding: 10px 12px 14px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .settings-toggle,
+      .settings-row {
+        width: 100%;
+        min-height: 58px;
+        padding: 7px 10px 7px 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgb(9 13 18 / 48%);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .settings-toggle {
+        text-align: left;
+        font-weight: 740;
+      }
+
+      .toggle-control {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .toggle-value {
+        min-width: 2.5em;
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-align: right;
+      }
+
+      .toggle-track {
+        position: relative;
+        width: 46px;
+        height: 28px;
+        border: 1px solid #5b6877;
+        border-radius: 999px;
+        background: #2a3440;
+        transition: border-color 120ms ease, background 120ms ease;
+      }
+
+      .toggle-track::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #d7e0e9;
+        box-shadow: 0 1px 4px rgb(0 0 0 / 38%);
+        transition: transform 120ms ease, background 120ms ease;
+      }
+
+      .settings-toggle[aria-checked="true"] .toggle-value {
+        color: var(--tuned);
+      }
+
+      .settings-toggle[aria-checked="true"] .toggle-track {
+        border-color: var(--tuned);
+        background: rgb(52 211 153 / 24%);
+      }
+
+      .settings-toggle[aria-checked="true"] .toggle-track::after {
+        transform: translateX(18px);
+        background: var(--tuned);
+      }
+
+      .settings-label {
+        font-weight: 740;
+      }
+
+      .stepper {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .stepper-button {
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel-strong);
+        color: var(--text);
+        font-size: 1.3rem;
+        font-weight: 700;
+        line-height: 1;
+      }
+
+      .stepper-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.4;
+      }
+
+      .hz-value {
+        min-width: 7ch;
+        color: var(--accent);
+        font-size: 0.94rem;
+        font-weight: 800;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+
+      @media (max-height: 620px) {
+        .app-shell {
+          grid-template-rows: 44px minmax(0, 1fr) auto;
+          padding-block: 6px;
+        }
+
+        .app-header {
+          min-height: 44px;
+        }
+
+        .tuning-button {
+          min-height: 44px;
+        }
+
+        .tuner-main {
+          grid-template-rows: 112px minmax(140px, 1fr) auto;
+          gap: 3px;
+        }
+
+        .gauge-stage,
+        .pitch-gauge {
+          height: 112px;
+        }
+
+        .debug-panel {
+          min-height: 66px;
+          padding-block: 3px;
+        }
+
+        .mic-button {
+          min-height: 56px;
+        }
+      }
+
+      @media (max-width: 350px) {
+        .app-header {
+          gap: 6px;
+        }
+
+        .app-header h1 {
+          max-width: 5.5rem;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <h1>ギターチューナー</h1>
+        <button
+          id="tuningButton"
+          class="tuning-button"
+          type="button"
+          aria-haspopup="dialog"
+          aria-controls="tuningDialog"
+          aria-expanded="false"
+        >
+          <span id="tuningButtonName" class="tuning-button-name">レギュラー</span>
+          <span class="tuning-chevron" aria-hidden="true">▼</span>
+        </button>
+        <button
+          type="button"
+          id="settings-open"
+          class="icon-button"
+          aria-label="設定を開く"
+          aria-haspopup="dialog"
+          aria-controls="settings-sheet"
+          aria-expanded="false"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path d="M9.6 3.2h4.8l.55 2.05c.46.18.89.43 1.29.74l2.05-.56 2.4 4.15-1.5 1.49c.04.31.06.62.06.93s-.02.62-.06.93l1.5 1.49-2.4 4.15-2.05-.56c-.4.31-.83.56-1.29.74l-.55 2.05H9.6l-.55-2.05a7.3 7.3 0 0 1-1.29-.74l-2.05.56-2.4-4.15 1.5-1.49A7 7 0 0 1 4.75 12c0-.31.02-.62.06-.93l-1.5-1.49 2.4-4.15 2.05.56c.4-.31.83-.56 1.29-.74L9.6 3.2Z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+        </button>
+      </header>
+
+      <main id="tunerMain" class="tuner-main" data-signal="empty" data-tuned="false">
+        <section class="gauge-stage" aria-label="セント偏差ゲージ">
+          <svg
+            id="pitchMeter"
+            class="pitch-gauge"
+            viewBox="0 0 280 150"
+            role="meter"
+            aria-valuemin="-50"
+            aria-valuemax="50"
+            aria-valuenow="0"
+            aria-valuetext="音程未検出"
+          >
+            <path id="gaugeTrack" class="gauge-track" aria-hidden="true"></path>
+            <g id="gaugeTicks" aria-hidden="true"></g>
+            <path id="gaugeDeviation" class="gauge-deviation signal-dependent" aria-hidden="true" hidden></path>
+            <circle id="gaugeMarker" class="gauge-marker signal-dependent" r="5.5" aria-hidden="true" hidden></circle>
+            <g class="gauge-readout signal-dependent" aria-hidden="true">
+              <text id="gaugeNote" class="gauge-note" x="140" y="108">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="176" y="108"></text>
+              <text id="gaugeCents" class="gauge-cents" x="140" y="134">—</text>
+            </g>
+            <text id="gaugeTunedText" class="gauge-tuned-text signal-dependent" x="140" y="18" aria-hidden="true"></text>
+          </svg>
+          <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="headstock-stage" aria-label="ギターヘッドストック">
+          <div id="headstock" class="headstock" role="group" aria-label="6弦ヘッドストック">
+            <img
+              class="headstock-image"
+              src="./assets/headstock-ebony-no-strings.png"
+              alt=""
+              draggable="false"
+              aria-hidden="true"
+            >
+            <svg
+              class="headstock-strings"
+              viewBox="0 0 941 1672"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <path class="string-line is-wound" data-i="0" vector-effect="non-scaling-stroke" d="M351 1672 L351 1390 L323 892"></path>
+              <path class="string-line is-wound" data-i="1" vector-effect="non-scaling-stroke" d="M396 1672 L396 1390 L323 635"></path>
+              <path class="string-line is-wound" data-i="2" vector-effect="non-scaling-stroke" d="M441 1672 L441 1390 L323 374"></path>
+              <path class="string-line is-plain" data-i="3" vector-effect="non-scaling-stroke" d="M486 1672 L486 1390 L612 374"></path>
+              <path class="string-line is-plain" data-i="4" vector-effect="non-scaling-stroke" d="M531 1672 L531 1390 L612 635"></path>
+              <path class="string-line is-plain" data-i="5" vector-effect="non-scaling-stroke" d="M576 1672 L576 1390 L612 892"></path>
+            </svg>
+            <button class="peg" data-i="0" data-side="left" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">E2</span>
+            </button>
+            <button class="peg" data-i="1" data-side="left" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">A2</span>
+            </button>
+            <button class="peg" data-i="2" data-side="left" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">D3</span>
+            </button>
+            <button class="peg" data-i="3" data-side="right" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">G3</span>
+            </button>
+            <button class="peg" data-i="4" data-side="right" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">B3</span>
+            </button>
+            <button class="peg" data-i="5" data-side="right" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">E4</span>
+            </button>
+          </div>
+        </section>
+
+        <section id="debugPanel" class="debug-panel" aria-label="デバッグ情報" hidden>
+          <span class="debug-item">raw Hz<b id="debugRaw">—</b></span>
+          <span class="debug-item">clarity<b id="debugClarity">—</b></span>
+          <span class="debug-item">stable Hz<b id="debugStable">—</b></span>
+          <span class="debug-item">σ raw<b id="debugSigmaRaw">—</b></span>
+          <span class="debug-item">σ stable<b id="debugSigmaStable">—</b></span>
+          <span class="debug-item">lag<b id="debugLag">—</b></span>
+          <span class="debug-item">¢/smp<b id="debugCentsPerSample">—</b></span>
+          <span class="debug-item">SR<b id="debugSampleRate">—</b></span>
+          <span class="debug-item">midi<b id="debugMidi">—</b></span>
+          <span class="debug-item">cents<b id="debugCents">—</b></span>
+          <span class="debug-item">context<b id="debugContext">none</b></span>
+        </section>
+      </main>
+
+      <footer class="controls">
+        <p id="errorMessage" class="error-message" role="alert" aria-live="assertive"></p>
+        <button id="micButton" class="mic-button" type="button" aria-pressed="false">
+          マイク開始
+        </button>
+      </footer>
+    </div>
+
+    <dialog id="tuningDialog" class="tuning-dialog" aria-labelledby="tuningDialogTitle">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <h2 id="tuningDialogTitle">チューニング</h2>
+          <button id="tuningDialogClose" class="dialog-close" type="button" aria-label="閉じる">×</button>
+        </header>
+        <div id="tuningList" class="tuning-list"></div>
+      </div>
+    </dialog>
+
+    <dialog id="settings-sheet" class="tuning-dialog settings-dialog" aria-labelledby="settings-title">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <h2 id="settings-title">設定</h2>
+          <button id="settings-close" class="dialog-close" type="button" aria-label="設定を閉じる">×</button>
+        </header>
+        <div class="settings-body">
+          <button type="button" class="settings-toggle" id="lefty-toggle" role="switch" aria-checked="false">
+            <span>左手モード</span>
+            <span class="toggle-control" aria-hidden="true">
+              <span id="lefty-value" class="toggle-value">オフ</span>
+              <span class="toggle-track"></span>
+            </span>
+          </button>
+          <button type="button" class="settings-toggle" id="sound-toggle" role="switch" aria-checked="true">
+            <span>合った時の音</span>
+            <span class="toggle-control" aria-hidden="true">
+              <span id="sound-value" class="toggle-value">オン</span>
+              <span class="toggle-track"></span>
+            </span>
+          </button>
+          <div class="settings-row">
+            <span class="settings-label">基準ピッチ</span>
+            <div class="stepper">
+              <button type="button" id="hz-down" class="stepper-button" aria-label="基準ピッチを下げる">−</button>
+              <span id="hz-value" class="hz-value" aria-live="polite">440 Hz</span>
+              <button type="button" id="hz-up" class="stepper-button" aria-label="基準ピッチを上げる">＋</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
