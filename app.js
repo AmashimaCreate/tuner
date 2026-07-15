@@ -35,22 +35,48 @@ const SETTINGS_STORAGE_KEY = "tuner.settings";
 const LEGACY_TUNING_STORAGE_KEY = "tuner.tuningId";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const HEADSTOCK_VIEWBOX_WIDTH = 941;
-const PEG_LAYOUT = [
-  { x: 16, y: 54, side: "left" },
-  { x: 16, y: 38, side: "left" },
-  { x: 16, y: 22, side: "left" },
-  { x: 84, y: 22, side: "right" },
-  { x: 84, y: 38, side: "right" },
-  { x: 84, y: 54, side: "right" },
-];
-const STRING_LAYOUT = [
-  [[351, 1672], [351, 1390], [323, 892]],
-  [[396, 1672], [396, 1390], [323, 635]],
-  [[441, 1672], [441, 1390], [323, 374]],
-  [[486, 1672], [486, 1390], [612, 374]],
-  [[531, 1672], [531, 1390], [612, 635]],
-  [[576, 1672], [576, 1390], [612, 892]],
-];
+const HEADSTOCK_TYPES = {
+  "three-three": {
+    label: "3対3",
+    image: "./assets/headstock-ebony-no-strings.png",
+    pegLayout: [
+      { x: 16, y: 54, side: "left" },
+      { x: 16, y: 38, side: "left" },
+      { x: 16, y: 22, side: "left" },
+      { x: 84, y: 22, side: "right" },
+      { x: 84, y: 38, side: "right" },
+      { x: 84, y: 54, side: "right" },
+    ],
+    stringLayout: [
+      [[351, 1672], [351, 1390], [323, 892]],
+      [[396, 1672], [396, 1390], [323, 635]],
+      [[441, 1672], [441, 1390], [323, 374]],
+      [[486, 1672], [486, 1390], [612, 374]],
+      [[531, 1672], [531, 1390], [612, 635]],
+      [[576, 1672], [576, 1390], [612, 892]],
+    ],
+  },
+  "six-inline": {
+    label: "6連",
+    image: "./assets/headstock-six-inline.png",
+    pegLayout: [
+      { x: 22, y: 83, side: "left" },
+      { x: 22, y: 69.5, side: "left" },
+      { x: 22, y: 56, side: "left" },
+      { x: 22, y: 42.5, side: "left" },
+      { x: 22, y: 29, side: "left" },
+      { x: 22, y: 15.5, side: "left" },
+    ],
+    stringLayout: [
+      [[351, 1672], [365, 1410], [339, 1055]],
+      [[396, 1672], [406, 1410], [367, 916]],
+      [[441, 1672], [447, 1410], [395, 775]],
+      [[486, 1672], [488, 1410], [423, 635]],
+      [[531, 1672], [529, 1410], [452, 495]],
+      [[576, 1672], [570, 1410], [480, 355]],
+    ],
+  },
+};
 const GAUGE = {
   centerX: 140,
   centerY: 140,
@@ -78,6 +104,8 @@ const elements = {
   settingsOpen: document.querySelector("#settings-open"),
   settingsSheet: document.querySelector("#settings-sheet"),
   settingsClose: document.querySelector("#settings-close"),
+  headstockThreeThree: document.querySelector("#headstock-three-three"),
+  headstockSixInline: document.querySelector("#headstock-six-inline"),
   leftyToggle: document.querySelector("#lefty-toggle"),
   leftyValue: document.querySelector("#lefty-value"),
   soundToggle: document.querySelector("#sound-toggle"),
@@ -86,6 +114,7 @@ const elements = {
   hzValue: document.querySelector("#hz-value"),
   hzUp: document.querySelector("#hz-up"),
   headstock: document.querySelector("#headstock"),
+  headstockImage: document.querySelector("#headstock-image"),
   gaugeTrack: document.querySelector("#gaugeTrack"),
   gaugeTicks: document.querySelector("#gaugeTicks"),
   gaugeDeviation: document.querySelector("#gaugeDeviation"),
@@ -140,6 +169,7 @@ let targetsMidi = [];
 let targetsHz = [];
 let autoString = -1;
 let manualString = null;
+let headstockType = "three-three";
 let leftHanded = false;
 let soundEnabled = true;
 let concertAHz = CONFIG.concertAHz;
@@ -194,6 +224,12 @@ elements.settingsSheet.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   event.preventDefault();
   closeSettingsSheet();
+});
+elements.headstockThreeThree.addEventListener("click", () => {
+  setHeadstockType("three-three");
+});
+elements.headstockSixInline.addEventListener("click", () => {
+  setHeadstockType("six-inline");
 });
 elements.leftyToggle.addEventListener("click", () => {
   leftHanded = !leftHanded;
@@ -869,6 +905,12 @@ function loadSettings() {
     if (raw) {
       const stored = JSON.parse(raw);
       if (stored && typeof stored === "object") {
+        if (
+          typeof stored.headstockType === "string" &&
+          Object.hasOwn(HEADSTOCK_TYPES, stored.headstockType)
+        ) {
+          headstockType = stored.headstockType;
+        }
         if (typeof stored.leftHanded === "boolean") leftHanded = stored.leftHanded;
         if (typeof stored.soundEnabled === "boolean") soundEnabled = stored.soundEnabled;
         if (Number.isFinite(stored.concertAHz)) {
@@ -910,6 +952,7 @@ function saveSettings({ removeLegacy = false } = {}) {
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       tuningId: currentTuning.id,
+      headstockType,
       leftHanded,
       soundEnabled,
       concertAHz,
@@ -1012,6 +1055,14 @@ function closeSettingsSheet() {
 }
 
 function syncSettingsUI() {
+  elements.headstockThreeThree.setAttribute(
+    "aria-pressed",
+    String(headstockType === "three-three"),
+  );
+  elements.headstockSixInline.setAttribute(
+    "aria-pressed",
+    String(headstockType === "six-inline"),
+  );
   elements.leftyToggle.setAttribute("aria-checked", String(leftHanded));
   elements.leftyValue.textContent = leftHanded ? "オン" : "オフ";
   elements.soundToggle.setAttribute("aria-checked", String(soundEnabled));
@@ -1019,6 +1070,14 @@ function syncSettingsUI() {
   elements.hzValue.textContent = `${concertAHz} Hz`;
   elements.hzDown.disabled = concertAHz <= CONFIG.concertAMin;
   elements.hzUp.disabled = concertAHz >= CONFIG.concertAMax;
+}
+
+function setHeadstockType(type) {
+  if (!Object.hasOwn(HEADSTOCK_TYPES, type) || type === headstockType) return;
+  headstockType = type;
+  renderHeadstock();
+  syncSettingsUI();
+  saveSettings();
 }
 
 function setConcertA(hz) {
@@ -1049,9 +1108,16 @@ function mirrorX(x, width = 220) {
 }
 
 function renderHeadstockLayout() {
+  const type = HEADSTOCK_TYPES[headstockType];
+  elements.headstock.dataset.type = headstockType;
+  elements.headstock.dataset.leftHanded = String(leftHanded);
+  if (elements.headstockImage.getAttribute("src") !== type.image) {
+    elements.headstockImage.setAttribute("src", type.image);
+  }
+
   for (const peg of elements.headstock.querySelectorAll(".peg")) {
     const index = Number(peg.dataset.i);
-    const layout = PEG_LAYOUT[index];
+    const layout = type.pegLayout[index];
     if (!layout) continue;
     peg.style.left = `${mirrorX(layout.x, 100)}%`;
     peg.style.top = `${layout.y}%`;
@@ -1062,7 +1128,7 @@ function renderHeadstockLayout() {
 
   for (const stringLine of elements.headstock.querySelectorAll(".string-line")) {
     const index = Number(stringLine.dataset.i);
-    const points = STRING_LAYOUT[index];
+    const points = type.stringLayout[index];
     if (!points) continue;
     const path = points.map(([x, y], pointIndex) => {
       const command = pointIndex === 0 ? "M" : "L";
@@ -1073,7 +1139,7 @@ function renderHeadstockLayout() {
 
   elements.headstock.setAttribute(
     "aria-label",
-    leftHanded ? "左手用6弦ヘッドストック" : "6弦ヘッドストック",
+    `${leftHanded ? "左手用・" : ""}${type.label}・6弦ヘッドストック`,
   );
 }
 
@@ -1178,7 +1244,7 @@ function setButtonActive(active) {
   elements.micButton.disabled = false;
   elements.micButton.removeAttribute("aria-busy");
   elements.micButton.setAttribute("aria-pressed", String(active));
-  elements.micButton.textContent = active ? "マイク停止" : "マイク開始";
+  elements.micButton.textContent = active ? "チューニング停止" : "チューニング開始";
 }
 
 function setError(message) {

@@ -14,12 +14,8 @@ export const TUNINGS = [
 
   { id: "dropD", name: "ドロップD", cat: "drop", notes: ["D2", "A2", "D3", "G3", "B3", "E4"] },
   { id: "doubleDropD", name: "ダブルドロップD", cat: "drop", notes: ["D2", "A2", "D3", "G3", "B3", "D4"] },
-  { id: "dadgad", name: "DADGAD", cat: "drop", notes: ["D2", "A2", "D3", "G3", "A3", "D4"] },
   { id: "dropCs", name: "ドロップC#", cat: "drop", notes: ["C#2", "G#2", "C#3", "F#3", "A#3", "D#4"] },
   { id: "dropC", name: "ドロップC", cat: "drop", notes: ["C2", "G2", "C3", "F3", "A3", "D4"] },
-  { id: "dropB", name: "ドロップB", cat: "drop", notes: ["B1", "F#2", "B2", "E3", "G#3", "C#4"] },
-  { id: "dropA", name: "ドロップA", cat: "drop", notes: ["A1", "E2", "A2", "D3", "F#3", "B3"] },
-  { id: "gModal", name: "Gモーダル", cat: "drop", notes: ["D2", "G2", "D3", "G3", "C4", "D4"] },
 
   { id: "openC", name: "オープンC", cat: "open", notes: ["C2", "G2", "C3", "G3", "C4", "E4"] },
   { id: "openE", name: "オープンE", cat: "open", notes: ["E2", "B2", "E3", "G#3", "B3", "E4"] },
@@ -34,11 +30,4 @@ export const TUNINGS = [
 
   { id: "halfDown", name: "半音下げ", cat: "transpose", notes: ["D#2", "G#2", "C#3", "F#3", "A#3", "D#4"] },
   { id: "wholeDown", name: "全音下げ", cat: "transpose", notes: ["D2", "G2", "C3", "F3", "A3", "D4"] },
-  { id: "halfUp", name: "半音上げ", cat: "transpose", notes: ["F2", "A#2", "D#3", "G#3", "C4", "F4"] },
-  { id: "wholeUp", name: "全音上げ", cat: "transpose", notes: ["F#2", "B2", "E3", "A3", "C#4", "F#4"] },
-
-  { id: "doubleDaddy", name: "ダブルダディ", cat: "special", notes: ["D2", "A2", "D3", "D3", "A3", "D4"] },
-  { id: "all4th", name: "オール4th", cat: "special", notes: ["E2", "A2", "D3", "G3", "C4", "F4"] },
-  { id: "nst", name: "NST", cat: "special", notes: ["C2", "G2", "D3", "A3", "E4", "G4"] },
-  { id: "ostrich", name: "オストリッチ", cat: "special", notes: ["D2", "D3", "D3", "D4", "D4", "D4"] },
 ];

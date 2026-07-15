@@ -200,6 +200,10 @@
         filter: drop-shadow(0 9px 14px rgb(0 0 0 / 38%));
       }
 
+      .headstock[data-type="six-inline"][data-left-handed="true"] .headstock-image {
+        transform: scaleX(-1);
+      }
+
       .headstock-strings {
         position: absolute;
         inset: 0;
@@ -262,6 +266,19 @@
       }
 
       .peg:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .headstock[data-type="six-inline"] .peg-ring {
+        display: none;
+      }
+
+      .headstock[data-type="six-inline"] .peg:focus-visible {
+        outline: none;
+      }
+
+      .headstock[data-type="six-inline"] .peg:focus-visible .peg-label {
         outline: 3px solid var(--focus);
         outline-offset: 2px;
       }
@@ -669,6 +686,31 @@
         font-weight: 740;
       }
 
+      .headstock-options {
+        flex: 0 0 auto;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(58px, 1fr));
+        gap: 8px;
+      }
+
+      .headstock-option {
+        min-width: 58px;
+        min-height: 44px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel-strong);
+        color: var(--muted);
+        font-size: 0.82rem;
+        font-weight: 760;
+      }
+
+      .headstock-option[aria-pressed="true"] {
+        border-color: var(--tuned);
+        background: rgb(52 211 153 / 13%);
+        color: var(--tuned);
+      }
+
       .stepper {
         flex: 0 0 auto;
         display: flex;
@@ -817,8 +859,9 @@
         </section>
 
         <section class="headstock-stage" aria-label="ギターヘッドストック">
-          <div id="headstock" class="headstock" role="group" aria-label="6弦ヘッドストック">
+          <div id="headstock" class="headstock" role="group" aria-label="3対3・6弦ヘッドストック" data-type="three-three" data-left-handed="false">
             <img
+              id="headstock-image"
               class="headstock-image"
               src="./assets/headstock-ebony-no-strings.png"
               alt=""
@@ -883,7 +926,7 @@
       <footer class="controls">
         <p id="errorMessage" class="error-message" role="alert" aria-live="assertive"></p>
         <button id="micButton" class="mic-button" type="button" aria-pressed="false">
-          マイク開始
+          チューニング開始
         </button>
       </footer>
     </div>
@@ -905,6 +948,13 @@
           <button id="settings-close" class="dialog-close" type="button" aria-label="設定を閉じる">×</button>
         </header>
         <div class="settings-body">
+          <div class="settings-row">
+            <span id="headstock-type-label" class="settings-label">ヘッドタイプ</span>
+            <div class="headstock-options" role="group" aria-labelledby="headstock-type-label">
+              <button type="button" id="headstock-three-three" class="headstock-option" aria-pressed="true">3対3</button>
+              <button type="button" id="headstock-six-inline" class="headstock-option" aria-pressed="false">6連</button>
+            </div>
+          </div>
           <button type="button" class="settings-toggle" id="lefty-toggle" role="switch" aria-checked="false">
             <span>左手モード</span>
             <span class="toggle-control" aria-hidden="true">
@@ -913,7 +963,7 @@
             </span>
           </button>
           <button type="button" class="settings-toggle" id="sound-toggle" role="switch" aria-checked="true">
-            <span>合った時の音</span>
+            <span>効果音</span>
             <span class="toggle-control" aria-hidden="true">
               <span id="sound-value" class="toggle-value">オン</span>
               <span class="toggle-track"></span>
