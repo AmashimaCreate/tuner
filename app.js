@@ -1,43 +1,18 @@
 import { PitchDetector } from "./pitchy.js";
 import {
   centsBetween,
-  createHannWindow,
-  matchPitchToTargets,
+  nearestStringIndex,
   robustMeanHz,
-  spectralMagnitudes,
-  TimedKeyStability,
-  TimedPitchStability,
 } from "./pitch-processing.js";
 import { CATEGORIES, TUNINGS } from "./tunings.js";
 
 const CONFIG = {
   detectorClarityThreshold: 0.9,
-  clarityAcquireMin: 0.82,
-  clarityTrackMin: 0.7,
-  rmsAcquireMin: 0.0035,
-  rmsReleaseMin: 0.002,
-  noiseFloorInitial: 0.001,
-  noiseFloorMin: 0.0002,
-  noiseFloorMax: 0.0024,
-  noiseFloorAcquireMultiplier: 2.5,
-  noiseFloorReleaseMultiplier: 1.6,
-  noiseCalibrationMs: 300,
-  noiseCalibrationTauMs: 80,
-  noiseFloorRiseTauMs: 3000,
-  noiseFloorFallTauMs: 400,
-  captureMs: 70,
-  captureStabilityCents: 30,
-  candidateMaxGapMs: 100,
-  trackingReleaseMs: 260,
-  jumpRejectCents: 100,
-  jumpConfirmMs: 35,
-  jumpStabilityCents: 40,
+  clarityMin: 0.6,
   holdMs: 1200,
   historyResetMs: 220,
   medianWindow: 5,
-  smoothingFastTauMs: 55,
-  smoothingFineTauMs: 160,
-  smoothingFineRangeCents: 12,
+  smoothingTauMs: 90,
   jitterWindowMs: 1000,
   jitterMinSamples: 8,
   inTuneCents: 5,
@@ -52,43 +27,15 @@ const CONFIG = {
   concertAMax: 466,
   concertAStep: 1,
   chimeGain: 0.045,
-  chimeStableMs: 240,
-  chimeBlankingMs: 480,
+  chimeHoldMs: 240,
   chimeRefractoryMs: 800,
   chimeReleaseCents: 12.5,
   midiA4: 69,
-  autoStringMatchMaxCents: 260,
-  manualStringMatchMaxCents: 700,
-  directPreferenceCents: 35,
-  octaveContinuityBonusCents: 15,
-  trackedTargetMatchCents: 45,
-  harmonicSupportAcquireRatio: 0.06,
-  harmonicSupportTrackRatio: 0.025,
-  aliasDirectFallbackMaxCents: 60,
-  autoStringConfirmMs: 45,
-  resumeTimeoutMs: 2000,
+  stringMatchMaxCents: 600,
+  stickyMarginCents: 80,
+  mutedTrackFallbackMs: 500,
+  resumeTimeoutMs: 5000,
 };
-
-const HANN_WINDOW = createHannWindow(CONFIG.fftSize);
-
-const autoStringCandidate = new TimedKeyStability({
-  durationMs: CONFIG.autoStringConfirmMs,
-  maxGapMs: CONFIG.candidateMaxGapMs,
-});
-const captureCandidate = new TimedPitchStability({
-  durationMs: CONFIG.captureMs,
-  widthCents: CONFIG.captureStabilityCents,
-  maxGapMs: CONFIG.candidateMaxGapMs,
-});
-const jumpCandidate = new TimedPitchStability({
-  durationMs: CONFIG.jumpConfirmMs,
-  widthCents: CONFIG.jumpStabilityCents,
-  maxGapMs: CONFIG.candidateMaxGapMs,
-});
-const inTuneCandidate = new TimedKeyStability({
-  durationMs: CONFIG.chimeStableMs,
-  maxGapMs: CONFIG.candidateMaxGapMs,
-});
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const NOTE_SEMITONE = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
@@ -193,7 +140,6 @@ const elements = {
   debugRaw: document.querySelector("#debugRaw"),
   debugClarity: document.querySelector("#debugClarity"),
   debugRms: document.querySelector("#debugRms"),
-  debugGate: document.querySelector("#debugGate"),
   debugCorrection: document.querySelector("#debugCorrection"),
   debugInput: document.querySelector("#debugInput"),
   debugStable: document.querySelector("#debugStable"),
@@ -219,6 +165,7 @@ let waveformBuffer = null;
 let animationFrameId = null;
 let microphoneActive = false;
 let microphonePending = false;
+let microphoneStartedAt = -Infinity;
 let lifecycleGeneration = 0;
 let trackEndedHandler = null;
 
@@ -231,14 +178,8 @@ let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 let lastStableHz = null;
-let trackedPitchKey = null;
-let noiseFloorRms = CONFIG.noiseFloorInitial;
-let lastNoiseFloorAt = null;
-let noiseCalibrationUntil = -Infinity;
 let lastMeasuredRms = Number.NaN;
-let lastSignalGateRms = CONFIG.rmsAcquireMin;
 let lastPitchCorrection = "—";
-let ignoreInputUntil = -Infinity;
 let currentTuning = TUNINGS.find((tuning) => tuning.id === "standard");
 let targetsMidi = [];
 let targetsHz = [];
@@ -249,6 +190,7 @@ let leftHanded = false;
 let soundEnabled = true;
 let concertAHz = CONFIG.concertAHz;
 let chimeArmed = true;
+let inTuneSince = null;
 let lastChimeAt = -Infinity;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
@@ -445,6 +387,7 @@ async function startMicrophoneFromGesture() {
     waveformBuffer = nextBuffer;
     microphoneActive = true;
     microphonePending = false;
+    microphoneStartedAt = performance.now();
 
     const inputTrack = mediaStream.getAudioTracks()[0];
     trackEndedHandler = () => {
@@ -454,9 +397,8 @@ async function startMicrophoneFromGesture() {
     };
     inputTrack?.addEventListener("ended", trackEndedHandler, { once: true });
 
-    resetChime({ clearBlanking: true });
+    resetChime();
     resetDetectionData();
-    resetNoiseModel(performance.now());
     resetDisplay();
     setButtonActive(true);
     updateDebugPanel();
@@ -483,6 +425,7 @@ function stopMicrophone() {
   ++lifecycleGeneration;
   microphoneActive = false;
   microphonePending = false;
+  microphoneStartedAt = -Infinity;
   cancelAnalysisLoop();
 
   const resources = {
@@ -503,9 +446,8 @@ function stopMicrophone() {
   waveformBuffer = null;
   trackEndedHandler = null;
 
-  resetChime({ clearBlanking: true });
+  resetChime();
   resetDetectionData();
-  resetNoiseModel();
   resetDisplay();
   setButtonActive(false);
   setButtonPending(false);
@@ -560,13 +502,15 @@ function analyseFrame(now) {
 
   try {
     const track = mediaStream?.getAudioTracks()[0];
+    // Some Android devices keep the muted flag set after permission; never let
+    // that advisory flag block an otherwise live stream indefinitely.
     const inputReady =
       audioContext?.state === "running" &&
       analyserNode &&
       pitchDetector &&
       waveformBuffer &&
       track?.readyState === "live" &&
-      !track.muted;
+      (!track.muted || now - microphoneStartedAt >= CONFIG.mutedTrackFallbackMs);
 
     if (!inputReady) {
       processInvalidFrame(now, { rawHz: Number.NaN, clarity: Number.NaN });
@@ -575,108 +519,18 @@ function analyseFrame(now) {
 
     analyserNode.getFloatTimeDomainData(waveformBuffer);
     const rms = calculateRms(waveformBuffer);
-    const tracking = isPitchTracking(now);
     lastMeasuredRms = rms;
 
-    if (now < ignoreInputUntil) {
-      const signalGateRms = getSignalGateRms(tracking);
-      lastSignalGateRms = signalGateRms;
-      updateDebugPanel({
-        rawHz: Number.NaN,
-        clarity: Number.NaN,
-        stableHz: lastStableHz,
-        rms,
-        signalGateRms,
-        correction: "効果音待避",
-      });
-      return;
-    }
-
-    const calibratingNoise = now < noiseCalibrationUntil;
-    updateNoiseFloor(rms, now, tracking, calibratingNoise);
-    let signalGateRms = getSignalGateRms(tracking);
     const [rawHz, clarity] = pitchDetector.findPitch(waveformBuffer, audioContext.sampleRate);
-    const clarityMin = tracking ? CONFIG.clarityTrackMin : CONFIG.clarityAcquireMin;
-    if (
-      !tracking &&
-      !calibratingNoise &&
-      Number.isFinite(clarity) &&
-      clarity < CONFIG.clarityAcquireMin &&
-      rms > signalGateRms
-    ) {
-      updateNoiseFloor(rms, now, false, true);
-      signalGateRms = getSignalGateRms(false);
-    }
-    lastSignalGateRms = signalGateRms;
     const valid =
-      !calibratingNoise &&
       Number.isFinite(rawHz) &&
       rawHz >= CONFIG.minPitchHz &&
       rawHz <= CONFIG.maxPitchHz &&
       Number.isFinite(clarity) &&
-      clarity >= clarityMin &&
-      rms >= signalGateRms;
+      clarity >= CONFIG.clarityMin;
 
     if (valid) {
-      const resolved = resolveDetectedPitch(rawHz, tracking);
-      if (!resolved) {
-        processInvalidFrame(now, {
-          rawHz,
-          clarity,
-          rms,
-          signalGateRms,
-          correction: "対象外",
-        });
-        return;
-      }
-
-      if (currentTuning.notes !== null && manualString === null) {
-        const stringReady = confirmAutoString(resolved.targetIndex, now);
-        if (!stringReady || autoString !== resolved.targetIndex) {
-          // Stability frames must be consecutive for the same string.
-          resetCaptureCandidate();
-          resetJumpCandidate();
-          processUnconfirmedFrame(now, {
-            rawHz,
-            clarity,
-            rms,
-            signalGateRms,
-            correction: `${resolved.correctionLabel} / 弦確認`,
-          });
-          return;
-        }
-      }
-
-      if (!tracking && !confirmPitchCapture(resolved.hz, now)) {
-        processUnconfirmedFrame(now, {
-          rawHz,
-          clarity,
-          rms,
-          signalGateRms,
-          correction: `${resolved.correctionLabel} / 音程確認`,
-        });
-        return;
-      }
-
-      if (tracking && !confirmTrackedPitch(resolved.hz, now)) {
-        processUnconfirmedFrame(now, {
-          rawHz,
-          clarity,
-          rms,
-          signalGateRms,
-          correction: `${resolved.correctionLabel} / 跳び確認`,
-        });
-        return;
-      }
-
-      const pitchKey = getResolvedPitchKey(resolved.hz);
-      if (pitchKey !== trackedPitchKey) {
-        clearPitchHistory({ clearStableValue: true });
-        trackedPitchKey = pitchKey;
-        resetTuneStability();
-      }
-
-      pitchRing.push(resolved.hz);
+      pitchRing.push(rawHz);
       if (pitchRing.length > CONFIG.medianWindow) pitchRing.shift();
 
       const stableHz = robustMeanHz(pitchRing);
@@ -685,23 +539,20 @@ function analyseFrame(now) {
       lastDetectedAt = now;
       gapHistoryCleared = false;
       lastStableHz = stableHz;
-      lastPitchCorrection = resolved.correctionLabel;
+      lastPitchCorrection = "×1";
       updateDisplay(stableHz, now);
       updateDebugPanel({
         rawHz,
         clarity,
         stableHz,
         rms,
-        signalGateRms,
-        correction: resolved.correctionLabel,
+        correction: "×1",
       });
     } else {
       processInvalidFrame(now, {
         rawHz,
         clarity,
         rms,
-        signalGateRms,
-        correction: calibratingNoise ? "ノイズ校正" : undefined,
       });
     }
   } catch {
@@ -713,10 +564,7 @@ function analyseFrame(now) {
 }
 
 function processInvalidFrame(now, values = {}) {
-  resetCaptureCandidate();
-  resetJumpCandidate();
-  resetAutoStringCandidate();
-  resetTuneStability();
+  inTuneSince = null;
 
   if (
     lastDetectedAt !== null &&
@@ -724,7 +572,6 @@ function processInvalidFrame(now, values = {}) {
     !gapHistoryCleared
   ) {
     clearPitchHistory({ clearStableValue: false });
-    resetAutoStringCandidate();
     gapHistoryCleared = true;
   }
 
@@ -737,22 +584,16 @@ function processInvalidFrame(now, values = {}) {
   updateDebugPanel({ ...values, stableHz: lastStableHz });
 }
 
-function processUnconfirmedFrame(now, values = {}) {
-  resetTuneStability();
-  if (lastDetectedAt !== null && now - lastDetectedAt > CONFIG.holdMs) {
-    resetDisplay();
-  } else if (lastDetectedAt !== null) {
-    dimDisplay();
-  }
-  updateDebugPanel({ ...values, stableHz: lastStableHz });
-}
-
 function updateDisplay(stableHz, now) {
   let measurement;
 
   if (currentTuning.notes === null) {
     measurement = analyzePitch(stableHz);
   } else {
+    if (manualString === null && updateAutoString(stableHz)) {
+      renderHeadstock();
+    }
+
     const stringIndex = activeString();
     if (stringIndex < 0) {
       renderNoTargetDisplay();
@@ -772,11 +613,7 @@ function updateDisplay(stableHz, now) {
     smoothedCents = cents;
   } else {
     const deltaMs = Math.max(0, now - lastDisplayAt);
-    const smoothingTauMs =
-      Math.abs(cents - smoothedCents) > CONFIG.smoothingFineRangeCents
-        ? CONFIG.smoothingFastTauMs
-        : CONFIG.smoothingFineTauMs;
-    const alpha = 1 - Math.exp(-deltaMs / smoothingTauMs);
+    const alpha = 1 - Math.exp(-deltaMs / CONFIG.smoothingTauMs);
     smoothedCents = alpha * cents + (1 - alpha) * smoothedCents;
   }
   lastDisplayAt = now;
@@ -818,7 +655,7 @@ function updateDisplay(stableHz, now) {
 function updateChime(cents, now) {
   if (!soundEnabled) {
     chimeArmed = true;
-    resetTuneStability();
+    inTuneSince = null;
     return;
   }
 
@@ -827,7 +664,7 @@ function updateChime(cents, now) {
   const refractoryElapsed = now - lastChimeAt >= CONFIG.chimeRefractoryMs;
 
   if (!inTune) {
-    resetTuneStability();
+    inTuneSince = null;
     // Ignore pitch disturbance caused by the chime itself during the refractory period.
     if (absoluteCents > CONFIG.chimeReleaseCents && refractoryElapsed) {
       chimeArmed = true;
@@ -835,12 +672,12 @@ function updateChime(cents, now) {
     return;
   }
 
-  const stableLongEnough = inTuneCandidate.push("in-tune", now);
+  if (inTuneSince === null || now < inTuneSince) inTuneSince = now;
+  const heldLongEnough = now - inTuneSince >= CONFIG.chimeHoldMs;
 
-  if (chimeArmed && refractoryElapsed && stableLongEnough && playInTuneChime(now)) {
+  if (chimeArmed && refractoryElapsed && heldLongEnough && playInTuneChime(now)) {
     lastChimeAt = now;
     chimeArmed = false;
-    resetTuneStability();
   }
 }
 
@@ -848,10 +685,7 @@ function playInTuneChime(now) {
   if (!soundEnabled || !audioContext || audioContext.state !== "running") return false;
 
   stopActiveChime();
-  ignoreInputUntil = Math.max(ignoreInputUntil, now + CONFIG.chimeBlankingMs);
   clearPitchHistory({ clearStableValue: false });
-  resetCaptureCandidate();
-  resetJumpCandidate();
 
   const context = audioContext;
   const startTime = context.currentTime;
@@ -901,12 +735,11 @@ function playInTuneChime(now) {
   return true;
 }
 
-function resetChime({ clearBlanking = false } = {}) {
+function resetChime() {
   stopActiveChime();
   chimeArmed = true;
+  inTuneSince = null;
   lastChimeAt = -Infinity;
-  resetTuneStability();
-  if (clearBlanking) ignoreInputUntil = -Infinity;
 }
 
 function stopActiveChime() {
@@ -934,10 +767,6 @@ function stopActiveChime() {
   activeChimeMaster = null;
 }
 
-function resetTuneStability() {
-  inTuneCandidate.reset();
-}
-
 function dimDisplay() {
   if (elements.tunerMain.dataset.signal !== "empty") {
     elements.tunerMain.dataset.signal = "dim";
@@ -948,13 +777,7 @@ function resetDisplay() {
   clearPitchHistory({ clearStableValue: true });
   lastDetectedAt = null;
   gapHistoryCleared = false;
-  resetCaptureCandidate();
-  resetJumpCandidate();
-  resetAutoStringCandidate();
-  autoString = -1;
-  trackedPitchKey = null;
   lastPitchCorrection = "—";
-  resetTuneStability();
 
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
@@ -974,21 +797,9 @@ function resetDetectionData() {
   clearPitchHistory({ clearStableValue: true });
   lastDetectedAt = null;
   gapHistoryCleared = false;
-  resetCaptureCandidate();
-  resetJumpCandidate();
-  resetAutoStringCandidate();
-  trackedPitchKey = null;
+  autoString = -1;
   lastPitchCorrection = "—";
   lastMeasuredRms = Number.NaN;
-  lastSignalGateRms = CONFIG.rmsAcquireMin;
-}
-
-function resetNoiseModel(startedAt = null) {
-  noiseFloorRms = CONFIG.noiseFloorInitial;
-  lastNoiseFloorAt = null;
-  noiseCalibrationUntil = Number.isFinite(startedAt)
-    ? startedAt + CONFIG.noiseCalibrationMs
-    : -Infinity;
 }
 
 function clearPitchHistory({ clearStableValue }) {
@@ -1099,112 +910,23 @@ function midiToHz(midi) {
   return concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
 }
 
-function resolveDetectedPitch(rawHz, tracking) {
-  if (currentTuning.notes === null) {
-    return {
-      rawHz,
-      hz: rawHz,
-      targetIndex: -1,
-      correction: "none",
-      correctionLabel: "×1",
-    };
+function updateAutoString(hz) {
+  const best = nearestStringIndex(hz, targetsHz, CONFIG.stringMatchMaxCents);
+  const previous = autoString;
+
+  if (best < 0) return false;
+  if (autoString < 0 || autoString >= targetsHz.length) {
+    autoString = best;
+    return autoString !== previous;
   }
 
-  const match = matchPitchToTargets(rawHz, targetsHz, {
-    onlyIndex: manualString,
-    preferredIndex: tracking && manualString === null ? autoString : -1,
-    maxDistanceCents:
-      manualString === null
-        ? CONFIG.autoStringMatchMaxCents
-        : CONFIG.manualStringMatchMaxCents,
-    directPreferenceCents: CONFIG.directPreferenceCents,
-    continuityBonusCents: CONFIG.octaveContinuityBonusCents,
-    preferPreferredTarget: tracking && manualString === null,
-    preferredTargetMaxCents: CONFIG.trackedTargetMatchCents,
-  });
-  if (manualString !== null || !match) return match;
-  return resolveHarmonicAlias(match, tracking);
-}
+  const currentDistance = Math.abs(centsBetween(hz, targetsHz[autoString]));
+  const bestDistance = Math.abs(centsBetween(hz, targetsHz[best]));
 
-function resolveHarmonicAlias(match, tracking) {
-  const directMatch = match.correction === "none"
-    ? match
-    : match.directAlternative;
-  const harmonicMatches = [
-    ...(match.correction.startsWith("harmonic-") ? [match] : []),
-    ...(match.harmonicAlternatives ?? []),
-  ].filter(
-    (candidate, index, candidates) =>
-      candidates.findIndex(
-        (other) =>
-          other.targetIndex === candidate.targetIndex &&
-          other.correction === candidate.correction,
-      ) === index,
-  );
-  if (harmonicMatches.length === 0 || !waveformBuffer || !audioContext) {
-    return match;
+  if (currentDistance - bestDistance > CONFIG.stickyMarginCents) {
+    autoString = best;
   }
-
-  const magnitudes = spectralMagnitudes(
-    waveformBuffer,
-    audioContext.sampleRate,
-    [match.rawHz, ...harmonicMatches.map((candidate) => candidate.hz)],
-    HANN_WINDOW,
-  );
-  const [detectedMagnitude, ...fundamentalMagnitudes] = magnitudes;
-  if (!Number.isFinite(detectedMagnitude) || detectedMagnitude <= 0) return match;
-
-  let supported = null;
-  for (const [index, harmonicMatch] of harmonicMatches.entries()) {
-    const fundamentalMagnitude = fundamentalMagnitudes[index];
-    const supportRatio = Number.isFinite(fundamentalMagnitude)
-      ? fundamentalMagnitude / detectedMagnitude
-      : 0;
-    const threshold =
-      tracking && autoString === harmonicMatch.targetIndex
-        ? CONFIG.harmonicSupportTrackRatio
-        : CONFIG.harmonicSupportAcquireRatio;
-    const confidence = supportRatio / threshold;
-    if (confidence >= 1 && (!supported || confidence > supported.confidence)) {
-      supported = { match: harmonicMatch, supportRatio, confidence };
-    }
-  }
-
-  const fallback =
-    tracking &&
-    match.correction.startsWith("harmonic-") &&
-    directMatch &&
-    directMatch !== match &&
-    directMatch.distanceCents <= CONFIG.aliasDirectFallbackMaxCents
-      ? directMatch
-      : match;
-  return supported
-    ? { ...supported.match, harmonicSupportRatio: supported.supportRatio }
-    : { ...fallback, harmonicSupportRatio: 0 };
-}
-
-function confirmAutoString(targetIndex, now) {
-  if (!Number.isInteger(targetIndex) || targetIndex < 0) return false;
-
-  if (targetIndex === autoString) {
-    resetAutoStringCandidate();
-    return true;
-  }
-
-  if (!autoStringCandidate.push(targetIndex, now)) return false;
-
-  autoString = targetIndex;
-  resetAutoStringCandidate();
-  clearPitchHistory({ clearStableValue: true });
-  trackedPitchKey = null;
-  resetJumpCandidate();
-  resetTuneStability();
-  renderHeadstock();
-  return true;
-}
-
-function resetAutoStringCandidate() {
-  autoStringCandidate.reset();
+  return autoString !== previous;
 }
 
 function activeString() {
@@ -1543,79 +1265,6 @@ function calculateRms(buffer) {
   return Math.sqrt(sumSquares / buffer.length);
 }
 
-function isPitchTracking(now) {
-  return lastDetectedAt !== null && now - lastDetectedAt <= CONFIG.trackingReleaseMs;
-}
-
-function getSignalGateRms(tracking) {
-  const minimum = tracking ? CONFIG.rmsReleaseMin : CONFIG.rmsAcquireMin;
-  const multiplier = tracking
-    ? CONFIG.noiseFloorReleaseMultiplier
-    : CONFIG.noiseFloorAcquireMultiplier;
-  return Math.max(minimum, noiseFloorRms * multiplier);
-}
-
-function updateNoiseFloor(rms, now, tracking, force = false) {
-  if (!Number.isFinite(rms) || tracking) return;
-
-  const acquireGate = Math.max(
-    CONFIG.rmsAcquireMin,
-    noiseFloorRms * CONFIG.noiseFloorAcquireMultiplier,
-  );
-  if (!force && rms > acquireGate) return;
-
-  const previousAt = lastNoiseFloorAt;
-  lastNoiseFloorAt = now;
-  const deltaMs = previousAt === null ? 16 : Math.max(0, now - previousAt);
-  const tauMs =
-    force
-      ? CONFIG.noiseCalibrationTauMs
-      : rms < noiseFloorRms
-        ? CONFIG.noiseFloorFallTauMs
-        : CONFIG.noiseFloorRiseTauMs;
-  const alpha = 1 - Math.exp(-deltaMs / tauMs);
-  noiseFloorRms = clamp(
-    alpha * rms + (1 - alpha) * noiseFloorRms,
-    CONFIG.noiseFloorMin,
-    CONFIG.noiseFloorMax,
-  );
-}
-
-function confirmPitchCapture(hz, now) {
-  if (!captureCandidate.push(hz, now)) return false;
-  resetCaptureCandidate();
-  return true;
-}
-
-function resetCaptureCandidate() {
-  captureCandidate.reset();
-}
-
-function confirmTrackedPitch(hz, now) {
-  if (
-    lastStableHz === null ||
-    Math.abs(centsBetween(hz, lastStableHz)) <= CONFIG.jumpRejectCents
-  ) {
-    resetJumpCandidate();
-    return true;
-  }
-
-  if (!jumpCandidate.push(hz, now)) return false;
-  clearPitchHistory({ clearStableValue: true });
-  resetJumpCandidate();
-  resetTuneStability();
-  return true;
-}
-
-function resetJumpCandidate() {
-  jumpCandidate.reset();
-}
-
-function getResolvedPitchKey(hz) {
-  if (currentTuning.notes === null) return `midi:${analyzePitch(hz).midi}`;
-  return `string:${activeString()}`;
-}
-
 function pushJitterSample(history, now, hz) {
   history.push({ t: now, hz });
   const cutoff = now - CONFIG.jitterWindowMs;
@@ -1727,7 +1376,6 @@ function updateDebugPanel(values = {}) {
   const rawHz = values.rawHz;
   const clarity = values.clarity;
   const rms = values.rms ?? lastMeasuredRms;
-  const signalGateRms = values.signalGateRms ?? lastSignalGateRms;
   const correction = values.correction ?? lastPitchCorrection;
   const stableHz = values.stableHz ?? lastStableHz;
   const midi = values.midi ?? previousMidi;
@@ -1740,7 +1388,8 @@ function updateDebugPanel(values = {}) {
   const centsPerSample = Number.isFinite(lag) && lag > 0 ? 1731 / lag : null;
   const sigmaRaw = jitterCents(rawHzHistory);
   const sigmaStable = jitterCents(stableHzHistory);
-  const inputSettings = mediaStream?.getAudioTracks()[0]?.getSettings?.() ?? {};
+  const inputTrack = mediaStream?.getAudioTracks()[0];
+  const inputSettings = inputTrack?.getSettings?.() ?? {};
 
   if (Object.hasOwn(values, "rawHz")) {
     elements.debugRaw.textContent = Number.isFinite(rawHz) ? rawHz.toFixed(2) : "—";
@@ -1749,11 +1398,9 @@ function updateDebugPanel(values = {}) {
     elements.debugClarity.textContent = Number.isFinite(clarity) ? clarity.toFixed(3) : "—";
   }
   elements.debugRms.textContent = Number.isFinite(rms) ? rms.toFixed(4) : "—";
-  elements.debugGate.textContent = Number.isFinite(signalGateRms)
-    ? signalGateRms.toFixed(4)
-    : "—";
   elements.debugCorrection.textContent = correction;
   elements.debugInput.textContent = [
+    inputTrack ? `track:${inputTrack.readyState}/${inputTrack.muted ? "muted" : "on"}` : "track:none",
     `EC:${formatDebugSwitch(inputSettings.echoCancellation)}`,
     `NS:${formatDebugSwitch(inputSettings.noiseSuppression)}`,
     `AGC:${formatDebugSwitch(inputSettings.autoGainControl)}`,
