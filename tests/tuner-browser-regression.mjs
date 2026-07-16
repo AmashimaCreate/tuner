@@ -133,28 +133,37 @@ try {
       centsTolerance: 8,
     });
 
+    await fixture.page.evaluate(() => {
+      window.__firstTunedAt = null;
+      const tunerMain = document.querySelector("#tunerMain");
+      const recordFirstTunedFrame = () => {
+        if (tunerMain?.dataset.tuned === "true" && window.__firstTunedAt === null) {
+          window.__firstTunedAt = performance.now();
+        }
+      };
+      window.__tunedObserver = new MutationObserver(recordFirstTunedFrame);
+      window.__tunedObserver.observe(tunerMain, {
+        attributes: true,
+        attributeFilter: ["data-tuned"],
+      });
+      recordFirstTunedFrame();
+    });
     await setFrequency(fixture.page, e2);
     await fixture.page.waitForFunction(
-      () => document.querySelector("#tunerMain")?.dataset.tuned === "true",
+      () => window.__oscillatorStarts === 3 && window.__firstTunedAt !== null,
       null,
       { timeout: 12_000 },
     );
-    const beforeHold = await fixture.page.evaluate(() => window.__oscillatorStarts);
-    assert.equal(beforeHold, 1, "chime must not fire on the first in-tune frame");
-    await fixture.page.waitForTimeout(160);
-    assert.equal(
-      await fixture.page.evaluate(() => window.__oscillatorStarts),
-      1,
-      "chime must wait for a continuous in-tune hold",
-    );
-    await fixture.page.waitForFunction(
-      () => window.__oscillatorStarts === 3,
-      null,
-      { timeout: 2_000 },
-    );
+    const timing = await fixture.page.evaluate(() => ({
+      firstTunedAt: window.__firstTunedAt,
+      firstChimeAt: window.__firstChimeAt,
+      oscillatorStarts: window.__oscillatorStarts,
+    }));
+    const heldMs = timing.firstChimeAt - timing.firstTunedAt;
+    assert.ok(heldMs >= 200, `chime hold was only ${heldMs.toFixed(1)}ms`);
     results.chime = {
-      beforeHold,
-      afterHold: await fixture.page.evaluate(() => window.__oscillatorStarts),
+      heldMs: Math.round(heldMs),
+      afterHold: timing.oscillatorStarts,
     };
     await fixture.context.close();
   }
@@ -177,12 +186,16 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
     }));
 
     window.__oscillatorStarts = 0;
+    window.__firstChimeAt = null;
     const originalCreateOscillator = AudioContext.prototype.createOscillator;
     AudioContext.prototype.createOscillator = function (...args) {
       const oscillator = originalCreateOscillator.apply(this, args);
       const originalStart = oscillator.start.bind(oscillator);
       oscillator.start = (...startArgs) => {
         window.__oscillatorStarts += 1;
+        if (window.__oscillatorStarts > 1 && window.__firstChimeAt === null) {
+          window.__firstChimeAt = performance.now();
+        }
         return originalStart(...startArgs);
       };
       return oscillator;

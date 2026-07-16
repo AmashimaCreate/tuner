@@ -26,6 +26,10 @@ export function nearestStringIndex(hz, targetsHz, maxDistanceCents) {
   return bestDistance <= maxDistanceCents ? bestIndex : -1;
 }
 
+// Only average samples near the median cluster. When one cluster has a
+// majority, octave errors roughly 1200 cents away cannot drag its mean.
+const NEAR_MEDIAN_CENTS = 50;
+
 export function robustMeanHz(values) {
   const logarithms = values
     .filter((value) => Number.isFinite(value) && value > 0)
@@ -35,8 +39,13 @@ export function robustMeanHz(values) {
   if (logarithms.length === 0) return Number.NaN;
   if (logarithms.length <= 2) return 2 ** medianSorted(logarithms);
 
-  const trimmed = logarithms.slice(1, -1);
-  const mean = trimmed.reduce((sum, value) => sum + value, 0) / trimmed.length;
+  const median = medianSorted(logarithms);
+  const near = logarithms.filter(
+    (value) => Math.abs(1200 * (value - median)) <= NEAR_MEDIAN_CENTS,
+  );
+
+  if (near.length === 0) return 2 ** median;
+  const mean = near.reduce((sum, value) => sum + value, 0) / near.length;
   return 2 ** mean;
 }
 
