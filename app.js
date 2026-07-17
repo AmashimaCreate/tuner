@@ -59,7 +59,10 @@ const CONFIG = {
   tunedEnterCents: 4,
   tunedExitCents: 7,
   nearTuneCents: 15,
-  meterRangeCents: 50,
+  // A fresh or badly slipped string sits 100-200 cents off; the needle must
+  // keep moving through that whole approach or winding feels like nothing is
+  // happening.
+  meterRangeCents: 200,
   // The inner +-10 cents get half the dial, mapped linearly: linear mapping
   // keeps jitter magnification constant (a square-root scale has unbounded
   // gain at zero and makes even a +-1 cent wobble look violent).
@@ -165,14 +168,13 @@ const GAUGE = {
   // scale, so the in-tune band (±5¢) occupies a quarter of each half-dial.
   ticks: [
     { cents: 0, rank: "major" },
-    { cents: 5, rank: "medium" },
-    { cents: 10, rank: "minor" },
-    { cents: 15, rank: "medium" },
+    { cents: 5, rank: "minor" },
+    { cents: 10, rank: "medium" },
     { cents: 20, rank: "minor" },
-    { cents: 25, rank: "medium" },
-    { cents: 30, rank: "minor" },
-    { cents: 40, rank: "minor" },
-    { cents: 50, rank: "major" },
+    { cents: 50, rank: "medium" },
+    { cents: 100, rank: "medium" },
+    { cents: 150, rank: "minor" },
+    { cents: 200, rank: "major" },
   ],
 };
 const GET_USER_MEDIA_CONSTRAINTS = {
