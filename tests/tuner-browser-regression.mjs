@@ -17,6 +17,10 @@ const results = {
   sticky: [],
   manual: null,
   chromatic: null,
+  lowInput: null,
+  octaveBurst: null,
+  releaseReacquire: null,
+  unmatchedSwitch: null,
   chime: null,
 };
 
@@ -31,6 +35,11 @@ try {
     assert.equal(state.activePeg, String(testCase.peg), testCase.name);
     assert.notEqual(state.activePeg, String(testCase.forbiddenPeg), testCase.name);
     assert.equal(state.correction, "×1", `${testCase.name}: no harmonic correction`);
+    assertOnlyExpectedPegs(
+      await readUiTrace(fixture.page),
+      [testCase.peg],
+      `${testCase.name}: transient peg`,
+    );
     results.observedRegressions.push({ name: testCase.name, ...state });
     await fixture.context.close();
   }
@@ -41,7 +50,122 @@ try {
     const state = await waitForPreset(fixture.page, { peg, note, cents: 0, hz });
     assert.equal(state.activePeg, String(peg), `open ${note}`);
     assert.ok(Math.abs(state.cents) <= 8, `open ${note}: ${state.cents} cents`);
+    assertOnlyExpectedPegs(
+      await readUiTrace(fixture.page),
+      [peg],
+      `open ${note}: transient peg`,
+    );
     results.openStrings.push({ expected: note, ...state });
+    await fixture.context.close();
+  }
+
+  {
+    const e2 = noteToHz("E2");
+    const fixture = await openFixture({
+      tuningId: "standard",
+      frequency: e2,
+      inputGain: 0.0005,
+    });
+    const state = await waitForPreset(fixture.page, {
+      peg: 0,
+      note: "E2",
+      cents: 0,
+      hz: e2,
+      centsTolerance: 10,
+    });
+    assert.equal(state.trackerState, "tracking", "low input must acquire tracking");
+    assert.ok(
+      state.rms >= 0.0002 && state.rms <= 0.0006,
+      `low input RMS outside Android fixture range: ${state.rms}`,
+    );
+    assertOnlyExpectedPegs(
+      await readUiTrace(fixture.page),
+      [0],
+      "low input: transient peg",
+    );
+    results.lowInput = state;
+    await fixture.context.close();
+  }
+
+  {
+    const e2 = noteToHz("E2");
+    const fixture = await openFixture({ tuningId: "standard", frequency: e2 });
+    await waitForPreset(fixture.page, { peg: 0, note: "E2", cents: 0, hz: e2 });
+    await resetUiTrace(fixture.page);
+
+    // A strong second harmonic may briefly win during a guitar attack. It must
+    // not move the UI to another string before the octave candidate is proven.
+    await setFrequency(fixture.page, noteToHz("E3"));
+    await fixture.page.waitForTimeout(140);
+    await setFrequency(fixture.page, e2);
+    const state = await waitForPreset(
+      fixture.page,
+      { peg: 0, note: "E2", cents: 0, hz: e2 },
+    );
+    const trace = await readUiTrace(fixture.page);
+    assertOnlyExpectedPegs(trace, [0], "brief E2→E3 octave burst");
+    assert.ok(
+      trace.some((entry) => entry.tracker.includes("switch-pending")),
+      `octave burst never reached switch-pending:\n${formatTrace(trace)}`,
+    );
+    results.octaveBurst = {
+      activePeg: state.activePeg,
+      switchPendingObserved: true,
+      trace: compactUiTrace(trace),
+    };
+    await fixture.context.close();
+  }
+
+  {
+    const e2 = noteToHz("E2");
+    const a2 = noteToHz("A2");
+    const fixture = await openFixture({ tuningId: "standard", frequency: e2 });
+    await waitForPreset(fixture.page, { peg: 0, note: "E2", cents: 0, hz: e2 });
+
+    await setInputGain(fixture.page, 0);
+    await fixture.page.waitForFunction(() => {
+      const main = document.querySelector("#tunerMain");
+      return main?.dataset.trackerState === "idle" &&
+        document.querySelector(".peg.is-active") === null;
+    }, null, { timeout: 4_000 });
+
+    await setFrequency(fixture.page, a2);
+    await resetUiTrace(fixture.page);
+    await setInputGain(fixture.page, 0.05);
+    const state = await waitForPreset(
+      fixture.page,
+      { peg: 1, note: "A2", cents: 0, hz: a2 },
+    );
+    const trace = await readUiTrace(fixture.page);
+    assertOnlyExpectedPegs(trace, [1], "release then A2 reacquisition");
+    assert.ok(
+      trace.some((entry) => entry.tracker.includes("acquired")),
+      `A2 reacquisition was not observed:\n${formatTrace(trace)}`,
+    );
+    results.releaseReacquire = {
+      activePeg: state.activePeg,
+      trackerState: state.trackerState,
+      trace: compactUiTrace(trace),
+    };
+    await fixture.context.close();
+  }
+
+  {
+    const e2 = noteToHz("E2");
+    const fixture = await openFixture({ tuningId: "standard", frequency: e2 });
+    await waitForPreset(fixture.page, { peg: 0, note: "E2", cents: 0, hz: e2 });
+    await setFrequency(fixture.page, 1000);
+    await fixture.page.waitForFunction(() => {
+      const main = document.querySelector("#tunerMain");
+      const tracker = document.querySelector("#debugTracker")?.textContent ?? "";
+      return main?.dataset.trackerState === "tracking" &&
+        tracker.includes("switched") &&
+        document.querySelector(".peg.is-active") === null &&
+        main.dataset.signal === "empty";
+    }, null, { timeout: 4_000 });
+    const state = await readState(fixture.page);
+    assert.equal(state.activePeg, null, "an unmatched confirmed pitch must clear stale peg");
+    results.unmatchedSwitch = state;
     await fixture.context.close();
   }
 
@@ -75,8 +199,21 @@ try {
       { peg: 0, note: "E2", cents: 270, hz: insideMargin, centsTolerance: 10 },
     ));
 
-    // A2 becomes 100 cents closer here, exceeding the 80-cent margin.
+    // A smooth in-note movement remains locked even after crossing the margin.
     const outsideMargin = e2 * 2 ** (300 / 1200);
+    await setFrequency(fixture.page, outsideMargin);
+    results.sticky.push(await waitForPreset(
+      fixture.page,
+      { peg: 0, note: "E2", cents: 300, hz: outsideMargin, centsTolerance: 10 },
+    ));
+
+    // A separately confirmed cluster re-runs sticky target selection. A2 is
+    // now 100 cents closer, so this real note change must move to A2.
+    await setFrequency(fixture.page, e2);
+    results.sticky.push(await waitForPreset(
+      fixture.page,
+      { peg: 0, note: "E2", cents: 0, hz: e2 },
+    ));
     await setFrequency(fixture.page, outsideMargin);
     results.sticky.push(await waitForPreset(
       fixture.page,
@@ -124,6 +261,7 @@ try {
       tuningId: "standard",
       frequency: e2 * 2 ** (30 / 1200),
       soundEnabled: true,
+      simulateChimeFeedback: true,
     });
     await waitForPreset(fixture.page, {
       peg: 0,
@@ -161,9 +299,55 @@ try {
     }));
     const heldMs = timing.firstChimeAt - timing.firstTunedAt;
     assert.ok(heldMs >= 200, `chime hold was only ${heldMs.toFixed(1)}ms`);
+    await fixture.page.waitForFunction(
+      () => document.querySelector("#tunerMain")?.dataset.inputBlanked === "false",
+      null,
+      { timeout: 2_000 },
+    );
+    const afterFeedback = await waitForPreset(fixture.page, {
+      peg: 0,
+      note: "E2",
+      cents: 0,
+      hz: e2,
+      centsTolerance: 8,
+    });
+    const trace = await readUiTrace(fixture.page);
+    assertOnlyExpectedPegs(trace, [0], "chime feedback blanking");
+    assert.ok(
+      trace.some((entry) => entry.inputBlanked === "true"),
+      `chime never blanked input:\n${formatTrace(trace)}`,
+    );
+    assert.ok(
+      trace.some((entry) => entry.tracker.includes("chime-blank")),
+      `chime blanking was not exposed in debug trace:\n${formatTrace(trace)}`,
+    );
+
+    // A natural release must rearm the completion sound for the next string.
+    await setInputGain(fixture.page, 0);
+    await fixture.page.waitForFunction(
+      () => document.querySelector("#tunerMain")?.dataset.trackerState === "idle",
+      null,
+      { timeout: 4_000 },
+    );
+    await setInputGain(fixture.page, 0.05);
+    await waitForPreset(fixture.page, {
+      peg: 0,
+      note: "E2",
+      cents: 0,
+      hz: e2,
+      centsTolerance: 8,
+    });
+    await fixture.page.waitForFunction(
+      () => window.__oscillatorStarts === 5,
+      null,
+      { timeout: 4_000 },
+    );
     results.chime = {
       heldMs: Math.round(heldMs),
       afterHold: timing.oscillatorStarts,
+      activePegAfterFeedback: afterFeedback.activePeg,
+      inputBlankingObserved: true,
+      rearmedAfterRelease: true,
     };
     await fixture.context.close();
   }
@@ -174,9 +358,22 @@ try {
 assert.deepEqual(pageErrors, [], `browser errors:\n${pageErrors.join("\n")}`);
 console.log(JSON.stringify(results, null, 2));
 
-async function openFixture({ tuningId, frequency, start = true, soundEnabled = false }) {
+async function openFixture({
+  tuningId,
+  frequency,
+  start = true,
+  soundEnabled = false,
+  inputGain = 0.05,
+  simulateChimeFeedback = false,
+}) {
   const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
-  await context.addInitScript(({ tuningId, frequency, soundEnabled }) => {
+  await context.addInitScript(({
+    tuningId,
+    frequency,
+    soundEnabled,
+    inputGain,
+    simulateChimeFeedback,
+  }) => {
     localStorage.setItem("tuner.settings", JSON.stringify({
       tuningId,
       soundEnabled,
@@ -187,6 +384,9 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
 
     window.__oscillatorStarts = 0;
     window.__firstChimeAt = null;
+    window.__inputTargetFrequency = frequency;
+    window.__simulateChimeFeedback = simulateChimeFeedback;
+    window.__feedbackInjected = false;
     const originalCreateOscillator = AudioContext.prototype.createOscillator;
     AudioContext.prototype.createOscillator = function (...args) {
       const oscillator = originalCreateOscillator.apply(this, args);
@@ -195,6 +395,23 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
         window.__oscillatorStarts += 1;
         if (window.__oscillatorStarts > 1 && window.__firstChimeAt === null) {
           window.__firstChimeAt = performance.now();
+        }
+        if (
+          window.__oscillatorStarts > 1 &&
+          window.__simulateChimeFeedback &&
+          !window.__feedbackInjected &&
+          window.__tunerRegressionInput
+        ) {
+          window.__feedbackInjected = true;
+          const { inputContext, oscillator: inputOscillator } =
+            window.__tunerRegressionInput;
+          inputOscillator.frequency.setValueAtTime(880, inputContext.currentTime);
+          setTimeout(() => {
+            inputOscillator.frequency.setValueAtTime(
+              window.__inputTargetFrequency,
+              inputContext.currentTime,
+            );
+          }, 320);
         }
         return originalStart(...startArgs);
       };
@@ -207,14 +424,14 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
       const gain = inputContext.createGain();
       const destination = inputContext.createMediaStreamDestination();
       oscillator.frequency.value = frequency;
-      gain.gain.value = 0.05;
+      gain.gain.value = inputGain;
       oscillator.connect(gain).connect(destination);
       oscillator.start();
       await inputContext.resume();
-      window.__tunerRegressionInput = { inputContext, oscillator };
+      window.__tunerRegressionInput = { inputContext, oscillator, gain };
       return destination.stream;
     };
-  }, { tuningId, frequency, soundEnabled });
+  }, { tuningId, frequency, soundEnabled, inputGain, simulateChimeFeedback });
 
   const page = await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(String(error)));
@@ -224,6 +441,7 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
     }
   });
   await page.goto(new URL("?debug=1", baseUrl).href, { waitUntil: "networkidle" });
+  await installUiTrace(page);
   if (start) await page.locator("#micButton").click();
   return { context, page };
 }
@@ -231,8 +449,16 @@ async function openFixture({ tuningId, frequency, start = true, soundEnabled = f
 async function setFrequency(page, frequency) {
   await page.evaluate((hz) => {
     const { inputContext, oscillator } = window.__tunerRegressionInput;
+    window.__inputTargetFrequency = hz;
     oscillator.frequency.setValueAtTime(hz, inputContext.currentTime);
   }, frequency);
+}
+
+async function setInputGain(page, value) {
+  await page.evaluate((gainValue) => {
+    const { inputContext, gain } = window.__tunerRegressionInput;
+    gain.gain.setValueAtTime(gainValue, inputContext.currentTime);
+  }, value);
 }
 
 async function waitForPreset(page, expected) {
@@ -264,6 +490,78 @@ async function waitForChromatic(page, note, hz) {
   return readState(page);
 }
 
+async function installUiTrace(page) {
+  await page.evaluate(() => {
+    window.__tunerUiTraceObserver?.disconnect();
+    window.__tunerUiTrace = [];
+    window.__tunerUiTraceStartedAt = performance.now();
+
+    const record = () => {
+      const main = document.querySelector("#tunerMain");
+      const entry = {
+        atMs: Math.round(performance.now() - window.__tunerUiTraceStartedAt),
+        activePeg: document.querySelector(".peg.is-active")?.dataset.i ?? null,
+        trackerState: main?.dataset.trackerState ?? "",
+        tracker: document.querySelector("#debugTracker")?.textContent ?? "",
+        inputBlanked: main?.dataset.inputBlanked ?? "false",
+        note: `${document.querySelector("#gaugeNote")?.textContent ?? ""}${
+          document.querySelector("#gaugeOctave")?.textContent ?? ""
+        }`,
+      };
+      const previous = window.__tunerUiTrace.at(-1);
+      const signature = JSON.stringify({ ...entry, atMs: 0 });
+      const previousSignature = previous
+        ? JSON.stringify({ ...previous, atMs: 0 })
+        : null;
+      if (signature !== previousSignature) window.__tunerUiTrace.push(entry);
+    };
+
+    window.__tunerUiTraceObserver = new MutationObserver(record);
+    window.__tunerUiTraceObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["class", "data-tracker-state", "data-input-blanked"],
+    });
+    record();
+  });
+}
+
+async function resetUiTrace(page) {
+  await page.evaluate(() => {
+    window.__tunerUiTrace = [];
+    window.__tunerUiTraceStartedAt = performance.now();
+  });
+}
+
+async function readUiTrace(page) {
+  // Let the MutationObserver flush changes made in the preceding animation frame.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+  return page.evaluate(() => window.__tunerUiTrace ?? []);
+}
+
+function assertOnlyExpectedPegs(trace, expectedPegs, label) {
+  const expected = new Set(expectedPegs.map(String));
+  const wrong = trace.filter(
+    (entry) => entry.activePeg !== null && !expected.has(entry.activePeg),
+  );
+  assert.deepEqual(wrong, [], `${label}:\n${formatTrace(trace)}`);
+}
+
+function compactUiTrace(trace) {
+  return trace.map(({ atMs, activePeg, tracker, inputBlanked }) => ({
+    atMs,
+    activePeg,
+    tracker,
+    inputBlanked,
+  }));
+}
+
+function formatTrace(trace) {
+  return JSON.stringify(compactUiTrace(trace), null, 2);
+}
+
 async function readState(page) {
   return page.evaluate(() => ({
     note: `${document.querySelector("#gaugeNote")?.textContent ?? ""}${document.querySelector("#gaugeOctave")?.textContent ?? ""}`,
@@ -271,7 +569,11 @@ async function readState(page) {
     rawHz: Number(document.querySelector("#debugRaw")?.textContent),
     stableHz: Number(document.querySelector("#debugStable")?.textContent),
     clarity: Number(document.querySelector("#debugClarity")?.textContent),
+    rms: Number(document.querySelector("#debugRms")?.textContent),
     correction: document.querySelector("#debugCorrection")?.textContent ?? "",
+    trackerState: document.querySelector("#tunerMain")?.dataset.trackerState ?? "",
+    tracker: document.querySelector("#debugTracker")?.textContent ?? "",
+    inputBlanked: document.querySelector("#tunerMain")?.dataset.inputBlanked ?? "false",
     activePeg: document.querySelector(".peg.is-active")?.dataset.i ?? null,
     manualPeg: document.querySelector(".peg.is-manual")?.dataset.i ?? null,
     activeCount: document.querySelectorAll(".peg.is-active").length,
