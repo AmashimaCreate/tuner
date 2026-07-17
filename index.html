@@ -444,22 +444,21 @@
         font-weight: 720;
       }
 
-      .gauge-action {
-        fill: var(--measure-color);
-        font-size: 15px;
-        font-weight: 800;
-        text-anchor: middle;
-        letter-spacing: 0.06em;
-        transition: fill 100ms ease;
+      .gauge-hint {
+        fill: none;
+        stroke-width: 5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
-      .tuner-main[data-signal="empty"] .gauge-action {
-        fill: var(--muted);
-        font-weight: 700;
+      .gauge-hint-turn {
+        stroke: var(--accent);
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 45%, transparent));
       }
 
-      .tuner-main[data-signal="dim"] .gauge-action {
-        opacity: 0.45;
+      .gauge-hint-check {
+        stroke: var(--tuned);
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--tuned) 55%, transparent));
       }
 
       .tuner-main[data-signal="dim"] .signal-dependent {
@@ -893,7 +892,11 @@
               <text id="gaugeOctave" class="gauge-octave" x="176" y="108"></text>
               <text id="gaugeCents" class="gauge-cents" x="140" y="134">—</text>
             </g>
-            <text id="gaugeAction" class="gauge-action" x="140" y="20" aria-hidden="true"></text>
+            <g class="signal-dependent" aria-hidden="true">
+              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M126 24 L140 10 L154 24" hidden></path>
+              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M126 10 L140 24 L154 10" hidden></path>
+              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M128 17 L136 25 L152 9" hidden></path>
+            </g>
           </svg>
           <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>
         </section>

@@ -35,10 +35,14 @@ try {
     assert.equal(state.activePeg, String(testCase.peg), testCase.name);
     assert.notEqual(state.activePeg, String(testCase.forbiddenPeg), testCase.name);
     assert.equal(state.correction, "×1", `${testCase.name}: no harmonic correction`);
-    // All three presets sit 200 cents flat: the meter must tell the player
-    // what to do about it, not just show a needle.
+    // All three presets sit 200 cents flat: the wordless raise hint (∧) must
+    // show, and only that one.
     assert.equal(state.direction, "flat", `${testCase.name}: direction`);
-    assert.equal(state.action, "低い ▲ 上げて", `${testCase.name}: action text`);
+    assert.deepEqual(
+      { up: state.hintUp, down: state.hintDown, check: state.hintCheck },
+      { up: true, down: false, check: false },
+      `${testCase.name}: raise hint`,
+    );
     assertOnlyExpectedPegs(
       await readUiTrace(fixture.page),
       [testCase.peg],
@@ -601,7 +605,9 @@ async function readState(page) {
     rms: Number(document.querySelector("#debugRms")?.textContent),
     correction: document.querySelector("#debugCorrection")?.textContent ?? "",
     direction: document.querySelector("#tunerMain")?.dataset.direction ?? "",
-    action: document.querySelector("#gaugeAction")?.textContent ?? "",
+    hintUp: !document.querySelector("#gaugeHintUp")?.hasAttribute("hidden"),
+    hintDown: !document.querySelector("#gaugeHintDown")?.hasAttribute("hidden"),
+    hintCheck: !document.querySelector("#gaugeHintCheck")?.hasAttribute("hidden"),
     trackerState: document.querySelector("#tunerMain")?.dataset.trackerState ?? "",
     tracker: document.querySelector("#debugTracker")?.textContent ?? "",
     inputBlanked: document.querySelector("#tunerMain")?.dataset.inputBlanked ?? "false",

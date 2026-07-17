@@ -40,15 +40,29 @@ const CONFIG = {
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
   displayHoldMs: 1500,
+  // Two-speed display smoothing: fast while the pitch is moving (a peg turn
+  // must feel immediate), slow once it has almost settled. A median-of-5
+  // prefilter absorbs single-frame spikes, and the needle only moves for
+  // changes above the deadband, so it settles instead of shimmering.
   smoothingMoveTauMs: 65,
-  smoothingFineTauMs: 110,
+  smoothingFineTauMs: 400,
   smoothingFineRangeCents: 12,
-  smoothingFineDeltaCents: 8,
+  smoothingFineDeltaCents: 12,
+  displayMedianWindow: 5,
+  needleDeadbandCents: 0.5,
   jitterWindowMs: 1000,
   jitterMinSamples: 8,
   inTuneCents: 5,
+  // The green state enters and leaves at different thresholds so measurement
+  // jitter at the boundary cannot strobe the display.
+  tunedEnterCents: 4,
+  tunedExitCents: 7,
   nearTuneCents: 15,
   meterRangeCents: 50,
+  // The inner +-10 cents get half the dial, mapped linearly: linear mapping
+  // keeps jitter magnification constant (a square-root scale has unbounded
+  // gain at zero and makes even a +-1 cent wobble look violent).
+  meterLinearCents: 10,
   // 62 keeps 60 Hz mains hum outside the pitch range while every listed
   // tuning's lowest string (C2 = 65.4 Hz) stays detectable down to -80 cents.
   minPitchHz: 62,
@@ -140,9 +154,8 @@ const GAUGE = {
   tickOuterRadius: 92,
   needleInnerRadius: 62,
   needleOuterRadius: 94,
-  // Square-root scale: ticks at these cents, sized by rank. The in-tune band
-  // (±5¢) occupies almost a third of each half-dial, so the last fine push is
-  // readable instead of being a two-pixel sliver near the centre.
+  // Ticks at these cents, sized by rank; positions follow the piecewise
+  // scale, so the in-tune band (±5¢) occupies a quarter of each half-dial.
   ticks: [
     { cents: 0, rank: "major" },
     { cents: 5, rank: "medium" },
@@ -192,7 +205,9 @@ const elements = {
   gaugeNote: document.querySelector("#gaugeNote"),
   gaugeOctave: document.querySelector("#gaugeOctave"),
   gaugeCents: document.querySelector("#gaugeCents"),
-  gaugeAction: document.querySelector("#gaugeAction"),
+  gaugeHintUp: document.querySelector("#gaugeHintUp"),
+  gaugeHintDown: document.querySelector("#gaugeHintDown"),
+  gaugeHintCheck: document.querySelector("#gaugeHintCheck"),
   tuneStatus: document.querySelector("#tuneStatus"),
   pitchMeter: document.querySelector("#pitchMeter"),
   micButton: document.querySelector("#micButton"),
@@ -236,6 +251,9 @@ const stableHzHistory = [];
 let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
+const displayCentsBuffer = [];
+let lastNeedleCents = null;
+let displayTuned = false;
 let lastStableHz = null;
 let lastMeasuredRms = Number.NaN;
 let lastPitchCorrection = "—";
@@ -766,7 +784,12 @@ function updateDisplay(stableHz, now, { reselectString = false } = {}) {
     };
   }
 
-  const { midi, cents } = measurement;
+  const { midi } = measurement;
+
+  if (midi !== previousMidi) displayCentsBuffer.length = 0;
+  displayCentsBuffer.push(measurement.cents);
+  if (displayCentsBuffer.length > CONFIG.displayMedianWindow) displayCentsBuffer.shift();
+  const cents = medianOf(displayCentsBuffer);
 
   if (midi !== previousMidi || smoothedCents === null || lastDisplayAt === null) {
     smoothedCents = cents;
@@ -791,38 +814,69 @@ function updateDisplay(stableHz, now, { reselectString = false } = {}) {
     -CONFIG.meterRangeCents,
     CONFIG.meterRangeCents,
   );
-  const inTune = Math.abs(smoothedCents) <= CONFIG.inTuneCents;
   const noteName = NOTE_NAMES[noteIndex];
   const centsText = formatCents(smoothedCents);
+
+  // Separate enter/leave thresholds so jitter at the boundary cannot strobe
+  // the green state on and off.
+  const absCents = Math.abs(smoothedCents);
+  if (displayTuned) {
+    if (absCents > CONFIG.tunedExitCents) displayTuned = false;
+  } else if (absCents <= CONFIG.tunedEnterCents) {
+    displayTuned = true;
+  }
 
   updateChime(smoothedCents, now);
 
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
   elements.gaugeCents.textContent = centsText;
-  renderGaugeValue(gaugeCents);
+  // The needle only moves for changes it is worth moving for; sub-deadband
+  // shimmer keeps the last position.
+  if (
+    lastNeedleCents === null ||
+    Math.abs(gaugeCents - lastNeedleCents) >= CONFIG.needleDeadbandCents
+  ) {
+    renderGaugeValue(gaugeCents);
+    lastNeedleCents = gaugeCents;
+  }
   elements.pitchMeter.setAttribute("aria-valuenow", gaugeCents.toFixed(1));
   elements.pitchMeter.setAttribute(
     "aria-valuetext",
     `${noteName}${octave}、${centsText}`,
   );
   elements.tunerMain.dataset.signal = "active";
-  elements.tunerMain.dataset.tuned = String(inTune);
+  elements.tunerMain.dataset.tuned = String(displayTuned);
 
-  // Tell the player what to DO, not just where the needle is.
-  const direction = inTune ? "tuned" : smoothedCents < 0 ? "flat" : "sharp";
-  const actionText = inTune
-    ? "✓ ぴったり！"
-    : direction === "flat"
-      ? "低い ▲ 上げて"
-      : "高い ▼ 下げて";
+  // Wordless guidance: ∧ = raise, ∨ = lower, ✓ = in tune. The dial, colors
+  // and needle carry the state; the symbol answers "what do I do".
+  const direction = displayTuned ? "tuned" : smoothedCents < 0 ? "flat" : "sharp";
   elements.tunerMain.dataset.direction = direction;
-  elements.gaugeAction.textContent = actionText;
-  if (elements.tuneStatus.textContent !== actionText) {
-    elements.tuneStatus.textContent = actionText;
+  setHiddenState(elements.gaugeHintUp, direction !== "flat");
+  setHiddenState(elements.gaugeHintDown, direction !== "sharp");
+  setHiddenState(elements.gaugeHintCheck, direction !== "tuned");
+  const statusText = displayTuned ? "ぴったり" : direction === "flat" ? "低い（上げる）" : "高い（下げる）";
+  if (elements.tuneStatus.textContent !== statusText) {
+    elements.tuneStatus.textContent = statusText;
   }
 
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
+}
+
+function setHiddenState(element, hidden) {
+  if (hidden) element.setAttribute("hidden", "");
+  else element.removeAttribute("hidden");
+}
+
+function medianOf(values) {
+  const sorted = [...values].sort(numberAscending);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[middle];
+  return (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function numberAscending(left, right) {
+  return left - right;
 }
 
 function updateChime(cents, now) {
@@ -833,7 +887,9 @@ function updateChime(cents, now) {
   }
 
   const absoluteCents = Math.abs(cents);
-  const inTune = absoluteCents <= CONFIG.inTuneCents;
+  // Follow the same hysteresis as the green display state: the chime confirms
+  // exactly what the player sees.
+  const inTune = displayTuned;
   const refractoryElapsed = now - lastChimeAt >= CONFIG.chimeRefractoryMs;
 
   if (!inTune) {
@@ -963,7 +1019,7 @@ function resetDisplay() {
   elements.tunerMain.dataset.signal = "empty";
   elements.tunerMain.dataset.tuned = "false";
   elements.tunerMain.dataset.direction = "none";
-  elements.gaugeAction.textContent = "弦を鳴らしてください";
+  hideTuneHints();
   if (elements.tuneStatus.textContent) elements.tuneStatus.textContent = "";
   renderHeadstock();
 }
@@ -991,9 +1047,12 @@ function syncTrackerState(result = { state: pitchTracker.state, event: pitchTrac
 function clearPitchHistory({ clearStableValue }) {
   rawHzHistory.length = 0;
   stableHzHistory.length = 0;
+  displayCentsBuffer.length = 0;
   previousMidi = null;
   smoothedCents = null;
   lastDisplayAt = null;
+  lastNeedleCents = null;
+  displayTuned = false;
   if (clearStableValue) lastStableHz = null;
 }
 
@@ -1054,11 +1113,18 @@ function initializeGauge() {
   elements.gaugeTicks.replaceChildren(fragment);
 }
 
-// Square-root mapping: |5¢| sits at 31.6% of the half-dial instead of 10%,
-// so fine tuning is readable while ±50¢ still fits.
+// Piecewise-linear mapping: the inner ±meterLinearCents take half the dial,
+// the rest is compressed into the outer half. Fine tuning stays readable and,
+// unlike a square-root scale, the gain near zero is finite, so measurement
+// wobble is not visually magnified at the very moment precision matters.
 function pt(cents, radius) {
-  const normalized = Math.sign(cents) *
-    Math.sqrt(Math.abs(cents) / CONFIG.meterRangeCents);
+  const absCents = Math.min(Math.abs(cents), CONFIG.meterRangeCents);
+  const linear = CONFIG.meterLinearCents;
+  const normalized = Math.sign(cents) * (
+    absCents <= linear
+      ? (absCents / linear) * 0.5
+      : 0.5 + ((absCents - linear) / (CONFIG.meterRangeCents - linear)) * 0.5
+  );
   const angle = normalized * GAUGE.angleRangeDegrees * Math.PI / 180;
   return [
     GAUGE.centerX + radius * Math.sin(angle),
@@ -1098,13 +1164,20 @@ function renderNoTargetDisplay() {
   elements.gaugeCents.textContent = "—";
   elements.gaugeNeedle.setAttribute("hidden", "");
   elements.gaugeMarker.setAttribute("hidden", "");
-  elements.gaugeAction.textContent = "対象の弦がありません";
+  hideTuneHints();
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "該当する弦なし");
   elements.tunerMain.dataset.signal = "empty";
   elements.tunerMain.dataset.tuned = "false";
   elements.tunerMain.dataset.direction = "none";
   if (elements.tuneStatus.textContent) elements.tuneStatus.textContent = "";
+}
+
+function hideTuneHints() {
+  displayTuned = false;
+  setHiddenState(elements.gaugeHintUp, true);
+  setHiddenState(elements.gaugeHintDown, true);
+  setHiddenState(elements.gaugeHintCheck, true);
 }
 
 function noteToMidi(note) {
