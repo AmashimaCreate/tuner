@@ -58,7 +58,12 @@ const CONFIG = {
   smoothingFineRangeCents: 12,
   smoothingFineDeltaCents: 12,
   displayMedianWindow: 5,
-  needleDeadbandCents: 0.5,
+  // The needle is drawn by an animation layer that eases toward the measured
+  // target every frame, so motion is continuous instead of hop-and-freeze.
+  needleAnimTauMs: 90,
+  // Bridge brief fine-measurement dropouts so the display does not fall back
+  // to the jittery frame-by-frame value for a few frames.
+  refinedHoldMs: 250,
   jitterWindowMs: 1000,
   jitterMinSamples: 8,
   inTuneCents: 5,
@@ -93,7 +98,7 @@ const CONFIG = {
   // window (171 ms at 48 kHz) — stable to fractions of a cent where the
   // frame-by-frame tracker jitters by several.
   refineFftSize: 8192,
-  refineMaxOffsetCents: 30,
+  refineMaxOffsetCents: 40,
   concertAHz: 440,
   concertAMin: 415,
   concertAMax: 466,
@@ -271,7 +276,11 @@ let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 const displayCentsBuffer = [];
-let lastNeedleCents = null;
+let needleTargetCents = null;
+let needleDrawnCents = null;
+let needleAnimatedAt = null;
+let lastRefinedHz = Number.NaN;
+let lastRefinedAt = -Infinity;
 let displayTuned = false;
 let attackBlankUntil = -Infinity;
 let slowRms = null;
@@ -717,6 +726,12 @@ function analyseFrame(now) {
         audioContext.sampleRate,
         referenceHz,
       ).hz;
+      if (Number.isFinite(refinedHz)) {
+        lastRefinedHz = refinedHz;
+        lastRefinedAt = now;
+      } else if (now - lastRefinedAt <= CONFIG.refinedHoldMs) {
+        refinedHz = lastRefinedHz;
+      }
     }
 
     processTrackerFrame(now, { rawHz, clarity, rms, folded, refinedHz });
@@ -728,6 +743,7 @@ function analyseFrame(now) {
       folded: false,
     });
   } finally {
+    animateNeedle(now);
     // Invalid or temporarily unavailable input must never kill the active loop.
     scheduleAnalysisFrame();
   }
@@ -833,6 +849,8 @@ function startAttackBlank(now) {
   displayCentsBuffer.length = 0;
   smoothedCents = null;
   lastDisplayAt = null;
+  lastRefinedHz = Number.NaN;
+  lastRefinedAt = -Infinity;
 }
 
 function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN, attackBlanked = false } = {}) {
@@ -929,15 +947,7 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
   elements.gaugeCents.textContent = centsText;
-  // The needle only moves for changes it is worth moving for; sub-deadband
-  // shimmer keeps the last position.
-  if (
-    lastNeedleCents === null ||
-    Math.abs(gaugeCents - lastNeedleCents) >= CONFIG.needleDeadbandCents
-  ) {
-    renderGaugeValue(gaugeCents);
-    lastNeedleCents = gaugeCents;
-  }
+  needleTargetCents = gaugeCents;
   elements.pitchMeter.setAttribute("aria-valuenow", gaugeCents.toFixed(1));
   elements.pitchMeter.setAttribute(
     "aria-valuetext",
@@ -1110,6 +1120,8 @@ function resetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
+  needleTargetCents = null;
+  needleDrawnCents = null;
   elements.gaugeNeedle.setAttribute("hidden", "");
   elements.gaugeMarker.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
@@ -1133,6 +1145,8 @@ function resetDetectionData() {
   attackBlankUntil = -Infinity;
   slowRms = null;
   slowRmsUpdatedAt = null;
+  lastRefinedHz = Number.NaN;
+  lastRefinedAt = -Infinity;
   lastPitchCorrection = "—";
   lastMeasuredRms = Number.NaN;
 }
@@ -1152,7 +1166,6 @@ function clearPitchHistory({ clearStableValue }) {
   previousMidi = null;
   smoothedCents = null;
   lastDisplayAt = null;
-  lastNeedleCents = null;
   displayTuned = false;
   if (clearStableValue) lastStableHz = null;
 }
@@ -1241,6 +1254,27 @@ function arcPath(startCents, endCents, radius) {
 }
 
 
+function animateNeedle(now) {
+  if (needleTargetCents === null) {
+    if (needleDrawnCents !== null) {
+      needleDrawnCents = null;
+      elements.gaugeNeedle.setAttribute("hidden", "");
+      elements.gaugeMarker.setAttribute("hidden", "");
+    }
+    needleAnimatedAt = now;
+    return;
+  }
+  if (needleDrawnCents === null) {
+    needleDrawnCents = needleTargetCents;
+  } else {
+    const deltaMs = Math.max(0, now - (needleAnimatedAt ?? now));
+    const alpha = 1 - Math.exp(-deltaMs / CONFIG.needleAnimTauMs);
+    needleDrawnCents += (needleTargetCents - needleDrawnCents) * alpha;
+  }
+  needleAnimatedAt = now;
+  renderGaugeValue(needleDrawnCents);
+}
+
 function renderGaugeValue(cents) {
   const tip = pt(cents, GAUGE.radius);
   const needleOuter = pt(cents, GAUGE.needleOuterRadius);
@@ -1263,6 +1297,8 @@ function renderNoTargetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
+  needleTargetCents = null;
+  needleDrawnCents = null;
   elements.gaugeNeedle.setAttribute("hidden", "");
   elements.gaugeMarker.setAttribute("hidden", "");
   hideTuneHints();

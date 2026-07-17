@@ -43,7 +43,7 @@ const APP_CONFIG = {
   humNotchQ: 35,
   fftSize: 2048,
   refineFftSize: 8192,
-  refineMaxOffsetCents: 30,
+  refineMaxOffsetCents: 40,
 };
 
 // The analysis chain the app builds in front of the analyser node.
