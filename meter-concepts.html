@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#090d12">
+<title>メーター表示案の比較（動作シミュレーション）</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #090d12;
+    --panel: #111923;
+    --line: #344456;
+    --text: #f5f8fc;
+    --muted: #aebdcd;
+    --off: #5a6472;
+    --accent: #e8a33d;
+    --tuned: #34d399;
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    padding: 12px 12px 40px;
+  }
+  h1 { font-size: 15px; font-weight: 800; margin: 6px 2px 2px; }
+  p.lead { color: var(--muted); font-size: 11px; margin: 0 2px 14px; line-height: 1.5; }
+  .concept {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    margin: 0 auto 14px;
+    max-width: 420px;
+    padding: 10px 12px 12px;
+  }
+  .concept h2 { font-size: 12px; font-weight: 800; margin: 0 0 1px; }
+  .concept h2 .tag { color: var(--accent); margin-right: 6px; }
+  .concept p { color: var(--muted); font-size: 10.5px; margin: 0 0 8px; line-height: 1.45; }
+  .stage { position: relative; height: 108px; }
+  canvas { display: block; width: 100%; height: 100%; }
+  .scenario {
+    position: sticky; top: 0; z-index: 5;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(4px);
+    padding: 6px 2px;
+    font-size: 11px; color: var(--accent); font-weight: 700;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .scenario span#phase { color: var(--text); }
+</style>
+</head>
+<body>
+<h1>メーター表示案（同じ模擬信号で動作比較）</h1>
+<p class="lead">シナリオ：弦を鳴らす → −160¢から巻き上げ → 行き過ぎて+6¢ → 追い込んで±1¢ → ジャスト維持 → 減衰。実機と同じ測定ゆらぎ（σ≈1¢）を含みます。</p>
+<div class="scenario">▶ 再生中: <span id="phase">—</span></div>
+
+<div class="concept">
+  <h2><span class="tag">現行</span>アークゲージ＋針</h2>
+  <p>いまの実装（比較用）。</p>
+  <div class="stage"><canvas id="c0"></canvas></div>
+</div>
+
+<div class="concept">
+  <h2><span class="tag">案A</span>バブルレーン</h2>
+  <p>数字入りのバブルが水平レーンを滑る。バネ物理（慣性＋減衰）で常にぬるっと動き、ジャストで中央に吸着して緑に。数字と針が一体なので視線移動ゼロ。</p>
+  <div class="stage"><canvas id="c1"></canvas></div>
+</div>
+
+<div class="concept">
+  <h2><span class="tag">案B</span>ストロボ</h2>
+  <p>縞模様の「流れる速さ」がズレ量。左流れ＝低い、右流れ＝高い、静止＝ジャスト。位置ではなく速度で読むため測定ゆらぎがほぼ見えず、縞が止まる瞬間の精度感が最強。</p>
+  <div class="stage"><canvas id="c2"></canvas></div>
+</div>
+
+<div class="concept">
+  <h2><span class="tag">案C</span>センターバー</h2>
+  <p>中央から伸びる棒の長さ＝ズレ量。点ではなく面なのでゆらぎが目立たない。最小・最平穏。大きな数字が主役。</p>
+  <div class="stage"><canvas id="c3"></canvas></div>
+</div>
+
+<script>
+"use strict";
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+const RANGE = 200, LINEAR = 10;
+
+// ---- shared simulated signal ----------------------------------------------
+// returns { cents|null, tuned, phase } for loop time t (seconds)
+let noiseSeed = 1234;
+function noise() {
+  noiseSeed ^= noiseSeed << 13; noiseSeed ^= noiseSeed >>> 17; noiseSeed ^= noiseSeed << 5;
+  return ((noiseSeed >>> 0) / 4294967296) - 0.5;
+}
+const LOOP = 11.5;
+function signalAt(t) {
+  const jitter = () => (Math.sin(t * 9.1) * 0.5 + Math.sin(t * 23.7) * 0.3 + noise() * 0.9);
+  if (t < 0.8) return { cents: null, phase: "待機（無音）" };
+  if (t < 1.0) return { cents: null, phase: "アタック（ブランキング中）" };
+  if (t < 3.6) { // winding up in peg turns: -160 -> -18
+    const k = (t - 1.0) / 2.6;
+    const steps = Math.min(1, Math.floor(k * 6) / 6 + (k * 6 % 1 < 0.55 ? (k * 6 % 1) / 0.55 : 1) / 6);
+    return { cents: -160 + 142 * steps + jitter() * 2, phase: "巻き上げ中（−160¢→）" };
+  }
+  if (t < 4.6) { // overshoot to +6
+    const k = (t - 3.6) / 1.0;
+    return { cents: -18 + 24 * Math.min(1, k * 1.3) + jitter(), phase: "行き過ぎ（+6¢）" };
+  }
+  if (t < 5.6) { // come back to ~0
+    const k = (t - 4.6) / 1.0;
+    return { cents: 6 - 6 * k + jitter() * 0.8, phase: "追い込み" };
+  }
+  if (t < 8.6) return { cents: jitter() * 0.8, phase: "ジャスト維持（±1¢のゆらぎ）" };
+  if (t < 10.2) return { cents: jitter() * 1.2, phase: "減衰中" };
+  return { cents: null, phase: "リリース（ホールド表示）" };
+}
+
+// piecewise position: +-10c = half, +-200 outer half  ->  [-1, 1]
+function pos(c) {
+  const a = Math.min(Math.abs(c), RANGE);
+  const p = a <= LINEAR ? (a / LINEAR) * 0.5 : 0.5 + ((a - LINEAR) / (RANGE - LINEAR)) * 0.5;
+  return Math.sign(c) * p;
+}
+function zoneColor(c, alpha = 1) {
+  const g = Math.max(0, 1 - Math.abs(c) / 15);
+  const mix = (a, b) => Math.round(a + (b - a) * g);
+  return `rgba(${mix(232, 52)}, ${mix(163, 211)}, ${mix(61, 153)}, ${alpha})`;
+}
+
+function setupCanvas(id) {
+  const el = document.getElementById(id);
+  const resize = () => {
+    el.width = el.clientWidth * DPR;
+    el.height = el.clientHeight * DPR;
+  };
+  resize();
+  addEventListener("resize", resize);
+  return el;
+}
+
+// ---- concept 0: current dial ----------------------------------------------
+const dial = { canvas: setupCanvas("c0"), drawn: null, last: null };
+function drawDial(sig, now) {
+  const { canvas } = dial;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h * 1.28, r = h * 1.05;
+  const A = 70 * Math.PI / 180;
+  const pt = (p, rad) => [cx + rad * Math.sin(p * A), cy - rad * Math.cos(p * A)];
+  ctx.lineCap = "round";
+  const arc = (p0, p1, rad, color, lw) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad, -Math.PI / 2 + p0 * A, -Math.PI / 2 + p1 * A);
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+  };
+  arc(-1, 1, r, "rgba(255,255,255,0.07)", 3 * DPR);
+  arc(pos(-15), pos(-5), r, "rgba(232,163,61,0.3)", 4 * DPR);
+  arc(pos(-5), pos(5), r, "rgba(52,211,153,0.55)", 6 * DPR);
+  arc(pos(5), pos(15), r, "rgba(232,163,61,0.3)", 4 * DPR);
+  for (const c of [0, 10, 50, 200]) for (const s of c === 0 ? [1] : [-1, 1]) {
+    const p = pos(c * s);
+    const [x1, y1] = pt(p, r * 0.92), [x2, y2] = pt(p, r * 0.85);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.strokeStyle = "rgba(255,255,255,0.3)"; ctx.lineWidth = DPR; ctx.stroke();
+  }
+  // needle with app's animation tau
+  const dt = dial.last === null ? 0 : (now - dial.last) / 1000;
+  dial.last = now;
+  if (sig.cents === null) { dial.drawn = null; return; }
+  if (dial.drawn === null) dial.drawn = sig.cents;
+  else dial.drawn += (sig.cents - dial.drawn) * (1 - Math.exp(-dt / 0.09));
+  const p = pos(dial.drawn);
+  const col = zoneColor(dial.drawn);
+  const [nx1, ny1] = pt(p, r * 0.62), [nx2, ny2] = pt(p, r * 0.96);
+  ctx.beginPath(); ctx.moveTo(nx1, ny1); ctx.lineTo(nx2, ny2);
+  ctx.strokeStyle = col; ctx.lineWidth = 3.5 * DPR; ctx.stroke();
+  const [mx, my] = pt(p, r);
+  ctx.beginPath(); ctx.arc(mx, my, 5 * DPR, 0, 7);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.fillStyle = col; ctx.font = `700 ${11 * DPR}px Inter, sans-serif`; ctx.textAlign = "center";
+  ctx.fillText(`${Math.round(dial.drawn)}¢`, cx, h * 0.88);
+}
+
+// ---- concept A: bubble lane ------------------------------------------------
+const bub = { canvas: setupCanvas("c1"), x: null, v: 0, last: null, shownInt: null };
+function drawBubble(sig, now) {
+  const { canvas } = bub;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const laneY = h * 0.62, margin = w * 0.08, span = (w - 2 * margin) / 2, cx = w / 2;
+  // lane
+  ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(margin, laneY); ctx.lineTo(w - margin, laneY);
+  ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 4 * DPR; ctx.stroke();
+  // green zone
+  ctx.beginPath(); ctx.moveTo(cx + pos(-5) * span, laneY); ctx.lineTo(cx + pos(5) * span, laneY);
+  ctx.strokeStyle = "rgba(52,211,153,0.4)"; ctx.lineWidth = 6 * DPR; ctx.stroke();
+  // ticks
+  for (const c of [10, 50, 200]) for (const s of [-1, 1]) {
+    const x = cx + pos(c * s) * span;
+    ctx.beginPath(); ctx.moveTo(x, laneY - 5 * DPR); ctx.lineTo(x, laneY + 5 * DPR);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = DPR; ctx.stroke();
+  }
+  // centre notch
+  ctx.beginPath(); ctx.moveTo(cx, laneY - 14 * DPR); ctx.lineTo(cx, laneY + 14 * DPR);
+  ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 2 * DPR; ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.font = `700 ${11 * DPR}px Inter, sans-serif`; ctx.textAlign = "center";
+  ctx.fillText("♭", margin, laneY + 22 * DPR);
+  ctx.fillText("♯", w - margin, laneY + 22 * DPR);
+
+  const dt = bub.last === null ? 0 : Math.min(0.05, (now - bub.last) / 1000);
+  bub.last = now;
+  if (sig.cents === null) { bub.x = null; bub.v = 0; return; }
+  const target = pos(sig.cents) * span;
+  if (bub.x === null) { bub.x = target; bub.v = 0; }
+  else {
+    // critically-damped-ish spring: physical inertia = the GuitarTuna feel
+    const omega = 9;
+    const accel = omega * omega * (target - bub.x) - 2 * 0.95 * omega * bub.v;
+    bub.v += accel * dt;
+    bub.x += bub.v * dt;
+  }
+  const inTune = Math.abs(sig.cents) <= 5 && Math.abs(bub.x - 0) < span * 0.08;
+  const x = cx + bub.x, rr = 19 * DPR;
+  const col = zoneColor(sig.cents);
+  ctx.beginPath(); ctx.arc(x, laneY, rr, 0, 7);
+  ctx.fillStyle = "rgba(17,25,35,0.9)"; ctx.fill();
+  ctx.lineWidth = 2.5 * DPR; ctx.strokeStyle = col;
+  ctx.shadowColor = col; ctx.shadowBlur = inTune ? 14 * DPR : 6 * DPR;
+  ctx.stroke(); ctx.shadowBlur = 0;
+  const intC = Math.round(sig.cents);
+  if (bub.shownInt === null || Math.abs(sig.cents - bub.shownInt) > 0.7) bub.shownInt = intC;
+  ctx.fillStyle = col; ctx.font = `800 ${12 * DPR}px Inter, sans-serif`;
+  ctx.fillText(inTune ? "✓" : String(bub.shownInt), x, laneY + 4.5 * DPR);
+}
+
+// ---- concept B: strobe -----------------------------------------------------
+const str = { canvas: setupCanvas("c2"), phase: 0, last: null, smooth: 0 };
+function drawStrobe(sig, now) {
+  const { canvas } = str;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const bandY = h * 0.18, bandH = h * 0.42, margin = w * 0.06;
+  const dt = str.last === null ? 0 : Math.min(0.05, (now - str.last) / 1000);
+  str.last = now;
+  const active = sig.cents !== null;
+  if (active) {
+    str.smooth += (sig.cents - str.smooth) * (1 - Math.exp(-dt / 0.12));
+    // velocity: cents -> stripe px/s, softly saturating so far-off still readable
+    const v = Math.sign(str.smooth) * Math.min(1, Math.abs(str.smooth) / 40) * 260;
+    str.phase += v * dt;
+  }
+  const period = 34;
+  const inTune = active && Math.abs(str.smooth) <= 5;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(margin, bandY, w - 2 * margin, bandH); ctx.clip();
+  ctx.fillStyle = "rgba(255,255,255,0.04)";
+  ctx.fillRect(margin, bandY, w - 2 * margin, bandH);
+  const col = active ? zoneColor(str.smooth, inTune ? 0.85 : 0.55) : "rgba(90,100,114,0.25)";
+  ctx.fillStyle = col;
+  const off = ((str.phase % period) + period) % period;
+  for (let x = margin - period + off * DPR / DPR; x < w - margin; x += period) {
+    ctx.save();
+    ctx.translate(x, bandY);
+    ctx.transform(1, 0, -0.35, 1, 0, 0); // slanted stripes
+    ctx.fillRect(0, 0, period * 0.45, bandH);
+    ctx.restore();
+  }
+  ctx.restore();
+  // centre marker + frame
+  ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = DPR;
+  ctx.strokeRect(margin, bandY, w - 2 * margin, bandH);
+  ctx.beginPath(); ctx.moveTo(w / 2, bandY - 6 * DPR); ctx.lineTo(w / 2, bandY + bandH + 6 * DPR);
+  ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.lineWidth = 2 * DPR; ctx.stroke();
+  // readout
+  if (active) {
+    const c = zoneColor(str.smooth);
+    ctx.fillStyle = c; ctx.textAlign = "center";
+    ctx.font = `800 ${13 * DPR}px Inter, sans-serif`;
+    ctx.fillText(inTune ? "✓ 静止" : `${str.smooth < 0 ? "◀" : "▶"} ${Math.abs(Math.round(str.smooth))}¢`, w / 2, h * 0.88);
+  } else {
+    ctx.fillStyle = "rgba(90,100,114,0.7)"; ctx.textAlign = "center";
+    ctx.font = `700 ${11 * DPR}px Inter, sans-serif`;
+    ctx.fillText("—", w / 2, h * 0.88);
+  }
+}
+
+// ---- concept C: centre bar -------------------------------------------------
+const bar = { canvas: setupCanvas("c3"), drawn: null, last: null, shownInt: null };
+function drawBar(sig, now) {
+  const { canvas } = bar;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const laneY = h * 0.68, margin = w * 0.08, span = (w - 2 * margin) / 2, cx = w / 2;
+  ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(margin, laneY); ctx.lineTo(w - margin, laneY);
+  ctx.strokeStyle = "rgba(255,255,255,0.07)"; ctx.lineWidth = 10 * DPR; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + pos(-5) * span, laneY); ctx.lineTo(cx + pos(5) * span, laneY);
+  ctx.strokeStyle = "rgba(52,211,153,0.35)"; ctx.lineWidth = 12 * DPR; ctx.stroke();
+  const dt = bar.last === null ? 0 : (now - bar.last) / 1000;
+  bar.last = now;
+  if (sig.cents === null) { bar.drawn = null; return; }
+  if (bar.drawn === null) bar.drawn = sig.cents;
+  else bar.drawn += (sig.cents - bar.drawn) * (1 - Math.exp(-dt / 0.11));
+  const col = zoneColor(bar.drawn);
+  const end = cx + pos(bar.drawn) * span;
+  const inTune = Math.abs(bar.drawn) <= 5;
+  ctx.beginPath(); ctx.moveTo(cx, laneY); ctx.lineTo(end, laneY);
+  ctx.strokeStyle = col; ctx.lineWidth = 10 * DPR;
+  ctx.shadowColor = col; ctx.shadowBlur = inTune ? 12 * DPR : 4 * DPR;
+  ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.moveTo(cx, laneY - 10 * DPR); ctx.lineTo(cx, laneY + 10 * DPR);
+  ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 2 * DPR; ctx.stroke();
+  const intC = Math.round(bar.drawn);
+  if (bar.shownInt === null || Math.abs(bar.drawn - bar.shownInt) > 0.7) bar.shownInt = intC;
+  ctx.fillStyle = col; ctx.textAlign = "center";
+  ctx.font = `800 ${22 * DPR}px Inter, sans-serif`;
+  ctx.fillText(inTune ? "✓" : `${bar.shownInt > 0 ? "+" : ""}${bar.shownInt}`, cx, h * 0.38);
+}
+
+// ---- loop ------------------------------------------------------------------
+const phaseEl = document.getElementById("phase");
+const start = performance.now();
+function frame(now) {
+  const t = ((now - start) / 1000) % LOOP;
+  const sig = signalAt(t);
+  phaseEl.textContent = sig.phase;
+  drawDial(sig, now);
+  drawBubble(sig, now);
+  drawStrobe(sig, now);
+  drawBar(sig, now);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
