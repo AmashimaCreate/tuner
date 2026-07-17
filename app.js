@@ -2,6 +2,7 @@ import {
   centsBetween,
   GuitarPitchAnalyzer,
   nearestStringIndex,
+  PitchRefiner,
   PitchTracker,
   PITCH_TRACKER_STATES,
 } from "./pitch-processing.js";
@@ -76,6 +77,12 @@ const CONFIG = {
   humNotchHz: [50, 60, 100, 120, 150, 180],
   humNotchQ: 35,
   fftSize: 2048,
+  // Fine-measurement stage: once the tracker holds a note, the displayed
+  // cents come from harmonic-weighted spectral measurement over this longer
+  // window (171 ms at 48 kHz) — stable to fractions of a cent where the
+  // frame-by-frame tracker jitters by several.
+  refineFftSize: 8192,
+  refineMaxOffsetCents: 30,
   concertAHz: 440,
   concertAMin: 415,
   concertAMax: 466,
@@ -237,8 +244,10 @@ let highpassNode = null;
 let notchNodes = [];
 let lowpassNode = null;
 let analyserNode = null;
+let refineAnalyserNode = null;
 let muteGainNode = null;
 let waveformBuffer = null;
+let refineBuffer = null;
 let animationFrameId = null;
 let microphoneActive = false;
 let microphonePending = false;
@@ -279,6 +288,8 @@ const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
   minHz: CONFIG.minPitchHz,
   maxHz: CONFIG.maxPitchHz,
 });
+
+const pitchRefiner = new PitchRefiner(CONFIG.refineFftSize);
 
 const pitchTracker = new PitchTracker({
   acquireClarityMin: CONFIG.clarityAcquireMin,
@@ -431,6 +442,7 @@ async function startMicrophoneFromGesture() {
   let nextNotches = [];
   let nextLowpass = null;
   let nextAnalyser = null;
+  let nextRefineAnalyser = null;
   let nextMuteGain = null;
 
   try {
@@ -467,6 +479,10 @@ async function startMicrophoneFromGesture() {
     nextAnalyser.fftSize = CONFIG.fftSize;
     nextAnalyser.smoothingTimeConstant = 0;
 
+    nextRefineAnalyser = nextContext.createAnalyser();
+    nextRefineAnalyser.fftSize = CONFIG.refineFftSize;
+    nextRefineAnalyser.smoothingTimeConstant = 0;
+
     nextMuteGain = nextContext.createGain();
     nextMuteGain.gain.value = 0;
 
@@ -478,10 +494,12 @@ async function startMicrophoneFromGesture() {
     }
     previousNode.connect(nextLowpass);
     nextLowpass.connect(nextAnalyser);
+    nextLowpass.connect(nextRefineAnalyser);
     nextAnalyser.connect(nextMuteGain);
     nextMuteGain.connect(nextContext.destination);
 
     const nextBuffer = new Float32Array(CONFIG.fftSize);
+    const nextRefineBuffer = new Float32Array(CONFIG.refineFftSize);
 
     // The permission sheet can suspend AudioContext on iOS, so resume again here.
     await resumeAudioContext(nextContext);
@@ -490,7 +508,7 @@ async function startMicrophoneFromGesture() {
       await releaseAudioResources({
         context: nextContext,
         stream: nextStream,
-        nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextMuteGain],
+        nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextRefineAnalyser, nextMuteGain],
       });
       return;
     }
@@ -502,8 +520,10 @@ async function startMicrophoneFromGesture() {
     notchNodes = nextNotches;
     lowpassNode = nextLowpass;
     analyserNode = nextAnalyser;
+    refineAnalyserNode = nextRefineAnalyser;
     muteGainNode = nextMuteGain;
     waveformBuffer = nextBuffer;
+    refineBuffer = nextRefineBuffer;
     microphoneActive = true;
     microphonePending = false;
     microphoneStartedAt = performance.now();
@@ -526,7 +546,7 @@ async function startMicrophoneFromGesture() {
     await releaseAudioResources({
       context: nextContext,
       stream: nextStream,
-      nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextMuteGain],
+      nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextRefineAnalyser, nextMuteGain],
     });
 
     if (generation !== lifecycleGeneration) return;
@@ -550,7 +570,7 @@ function stopMicrophone() {
   const resources = {
     context: audioContext,
     stream: mediaStream,
-    nodes: [sourceNode, highpassNode, ...notchNodes, lowpassNode, analyserNode, muteGainNode],
+    nodes: [sourceNode, highpassNode, ...notchNodes, lowpassNode, analyserNode, refineAnalyserNode, muteGainNode],
     endedHandler: trackEndedHandler,
   };
 
@@ -561,8 +581,10 @@ function stopMicrophone() {
   notchNodes = [];
   lowpassNode = null;
   analyserNode = null;
+  refineAnalyserNode = null;
   muteGainNode = null;
   waveformBuffer = null;
+  refineBuffer = null;
   trackEndedHandler = null;
 
   resetChime();
@@ -672,7 +694,19 @@ function analyseFrame(now) {
       audioContext.sampleRate,
       { referenceHz },
     );
-    processTrackerFrame(now, { rawHz, clarity, rms, folded });
+
+    // Fine measurement over the long window, anchored on the tracked pitch.
+    let refinedHz = Number.NaN;
+    if (referenceHz !== null && refineAnalyserNode && refineBuffer) {
+      refineAnalyserNode.getFloatTimeDomainData(refineBuffer);
+      refinedHz = pitchRefiner.refine(
+        refineBuffer,
+        audioContext.sampleRate,
+        referenceHz,
+      ).hz;
+    }
+
+    processTrackerFrame(now, { rawHz, clarity, rms, folded, refinedHz });
   } catch {
     processTrackerFrame(now, {
       rawHz: Number.NaN,
@@ -686,7 +720,7 @@ function analyseFrame(now) {
   }
 }
 
-function processTrackerFrame(now, { rawHz, clarity, rms, folded = false }) {
+function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refinedHz = Number.NaN }) {
   const rawInRange =
     Number.isFinite(rawHz) &&
     rawHz >= CONFIG.minPitchHz &&
@@ -719,7 +753,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false }) {
     lastPitchCorrection = folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
-    updateDisplay(stableHz, now, { reselectString });
+    updateDisplay(stableHz, now, { reselectString, refinedHz });
   } else if (result.event === "released") {
     // Keep the last reading visible but dimmed for a short while: a plucked
     // string fading out should not blank the tuner the player is reading.
@@ -759,11 +793,21 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false }) {
   });
 }
 
-function updateDisplay(stableHz, now, { reselectString = false } = {}) {
+function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN } = {}) {
+  // The fine measurement is trusted only while it agrees with the tracker;
+  // during fast changes the long window smears and the tracker leads.
+  const displayHz =
+    Number.isFinite(refinedHz) &&
+    Math.abs(centsBetween(refinedHz, stableHz)) <= CONFIG.refineMaxOffsetCents
+      ? refinedHz
+      : stableHz;
   let measurement;
 
   if (currentTuning.notes === null) {
-    measurement = analyzePitch(stableHz);
+    // Note selection follows the tracker; the cents follow the fine stage.
+    const coarse = analyzePitch(stableHz);
+    const targetHz = concertAHz * 2 ** ((coarse.midi - CONFIG.midiA4) / 12);
+    measurement = { midi: coarse.midi, cents: centsBetween(displayHz, targetHz) };
   } else {
     if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
     if (manualString === null && reselectFramesLeft > 0) {
@@ -780,7 +824,7 @@ function updateDisplay(stableHz, now, { reselectString = false } = {}) {
 
     measurement = {
       midi: targetsMidi[stringIndex],
-      cents: centsBetween(stableHz, targetsHz[stringIndex]),
+      cents: centsBetween(displayHz, targetsHz[stringIndex]),
     };
   }
 
