@@ -377,37 +377,22 @@
         font-variant-numeric: tabular-nums;
       }
 
-      .gauge-track {
-        fill: none;
-        stroke: rgb(255 255 255 / 7%);
-        stroke-width: 3;
+      .gauge-lane {
+        stroke: rgb(255 255 255 / 9%);
+        stroke-width: 4;
         stroke-linecap: round;
       }
 
       .gauge-zone-fine {
-        fill: none;
-        stroke: color-mix(in srgb, var(--tuned) 55%, transparent);
+        stroke: color-mix(in srgb, var(--tuned) 45%, transparent);
         stroke-width: 6;
         stroke-linecap: round;
       }
 
-      .gauge-zone-near {
-        fill: none;
-        stroke: color-mix(in srgb, var(--accent) 30%, transparent);
-        stroke-width: 4;
-      }
-
-      .gauge-needle {
-        stroke: var(--measure-color);
-        stroke-width: 3.5;
+      .gauge-notch {
+        stroke: rgb(255 255 255 / 50%);
+        stroke-width: 2;
         stroke-linecap: round;
-        transition: stroke 100ms ease;
-        filter: drop-shadow(0 0 4px color-mix(in srgb, var(--measure-color) 45%, transparent));
-      }
-
-      .gauge-marker {
-        fill: var(--measure-color);
-        filter: drop-shadow(0 0 5px color-mix(in srgb, var(--measure-color) 60%, transparent));
       }
 
       .gauge-end-label {
@@ -416,6 +401,27 @@
         font-weight: 700;
         text-anchor: middle;
         dominant-baseline: middle;
+      }
+
+      .gauge-bubble-circle {
+        fill: color-mix(in srgb, var(--panel) 92%, transparent);
+        stroke: var(--measure-color);
+        stroke-width: 2.5;
+        transition: stroke 100ms ease;
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--measure-color) 55%, transparent));
+      }
+
+      .tuner-main[data-tuned="true"] .gauge-bubble-circle {
+        filter: drop-shadow(0 0 12px color-mix(in srgb, var(--measure-color) 75%, transparent));
+      }
+
+      .gauge-bubble-text {
+        fill: var(--measure-color);
+        font-size: 13px;
+        font-weight: 800;
+        text-anchor: middle;
+        dominant-baseline: central;
+        transition: fill 100ms ease;
       }
 
       .gauge-readout {
@@ -429,19 +435,14 @@
       }
 
       .gauge-note {
-        font-size: 44px;
+        font-size: 40px;
         font-weight: 760;
         letter-spacing: -0.04em;
       }
 
       .gauge-octave {
-        font-size: 17px;
+        font-size: 16px;
         font-weight: 750;
-      }
-
-      .gauge-cents {
-        font-size: 15px;
-        font-weight: 720;
       }
 
       .gauge-hint {
@@ -882,15 +883,17 @@
             aria-valuenow="0"
             aria-valuetext="音程未検出"
           >
-            <path id="gaugeTrack" class="gauge-track" aria-hidden="true"></path>
-            <g id="gaugeZones" aria-hidden="true"></g>
+            <line id="gaugeLane" class="gauge-lane" aria-hidden="true"></line>
+            <line id="gaugeZoneFine" class="gauge-zone-fine" aria-hidden="true"></line>
             <g id="gaugeTicks" aria-hidden="true"></g>
-            <line id="gaugeNeedle" class="gauge-needle signal-dependent" aria-hidden="true" hidden></line>
-            <circle id="gaugeMarker" class="gauge-marker signal-dependent" r="5.5" aria-hidden="true" hidden></circle>
+            <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
-              <text id="gaugeNote" class="gauge-note" x="140" y="108">—</text>
-              <text id="gaugeOctave" class="gauge-octave" x="176" y="108"></text>
-              <text id="gaugeCents" class="gauge-cents" x="140" y="134">—</text>
+              <text id="gaugeNote" class="gauge-note" x="140" y="64">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="172" y="64"></text>
+            </g>
+            <g id="gaugeBubble" class="gauge-bubble signal-dependent" aria-hidden="true" hidden>
+              <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="19"></circle>
+              <text id="gaugeCents" class="gauge-bubble-text" y="0">—</text>
             </g>
             <g class="signal-dependent" aria-hidden="true">
               <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M126 24 L140 10 L154 24" hidden></path>

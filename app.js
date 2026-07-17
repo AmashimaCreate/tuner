@@ -58,9 +58,11 @@ const CONFIG = {
   smoothingFineRangeCents: 12,
   smoothingFineDeltaCents: 12,
   displayMedianWindow: 5,
-  // The needle is drawn by an animation layer that eases toward the measured
-  // target every frame, so motion is continuous instead of hop-and-freeze.
-  needleAnimTauMs: 90,
+  // The bubble is driven by a critically-damped spring toward the measured
+  // target every frame: physical inertia makes all motion continuous and
+  // organic instead of hop-and-freeze.
+  bubbleSpringOmega: 9,
+  bubbleSpringZeta: 0.95,
   // Bridge brief fine-measurement dropouts so the display does not fall back
   // to the jittery frame-by-frame value for a few frames.
   refinedHoldMs: 250,
@@ -171,22 +173,13 @@ const HEADSTOCK_TYPES = {
 };
 const GAUGE = {
   centerX: 140,
-  centerY: 140,
-  radius: 100,
-  angleRangeDegrees: 70,
-  tickOuterRadius: 92,
-  needleInnerRadius: 62,
-  needleOuterRadius: 94,
-  // Ticks at these cents, sized by rank; positions follow the piecewise
-  // scale, so the in-tune band (±5¢) occupies a quarter of each half-dial.
+  laneY: 104,
+  halfSpanX: 118,
+  // Ticks at these cents; positions follow the piecewise scale, so the
+  // in-tune band (±5¢) occupies a quarter of each half-lane.
   ticks: [
-    { cents: 0, rank: "major" },
-    { cents: 5, rank: "minor" },
     { cents: 10, rank: "medium" },
-    { cents: 20, rank: "minor" },
     { cents: 50, rank: "medium" },
-    { cents: 100, rank: "medium" },
-    { cents: 150, rank: "minor" },
     { cents: 200, rank: "major" },
   ],
 };
@@ -219,11 +212,12 @@ const elements = {
   hzUp: document.querySelector("#hz-up"),
   headstock: document.querySelector("#headstock"),
   headstockImage: document.querySelector("#headstock-image"),
-  gaugeTrack: document.querySelector("#gaugeTrack"),
   gaugeTicks: document.querySelector("#gaugeTicks"),
-  gaugeZones: document.querySelector("#gaugeZones"),
-  gaugeNeedle: document.querySelector("#gaugeNeedle"),
-  gaugeMarker: document.querySelector("#gaugeMarker"),
+  gaugeLane: document.querySelector("#gaugeLane"),
+  gaugeZoneFine: document.querySelector("#gaugeZoneFine"),
+  gaugeNotch: document.querySelector("#gaugeNotch"),
+  gaugeBubble: document.querySelector("#gaugeBubble"),
+  gaugeBubbleCircle: document.querySelector("#gaugeBubbleCircle"),
   gaugeNote: document.querySelector("#gaugeNote"),
   gaugeOctave: document.querySelector("#gaugeOctave"),
   gaugeCents: document.querySelector("#gaugeCents"),
@@ -277,9 +271,10 @@ let smoothedCents = null;
 let lastDisplayAt = null;
 const displayCentsBuffer = [];
 let displayedCentsInt = null;
-let needleTargetCents = null;
-let needleDrawnCents = null;
-let needleAnimatedAt = null;
+let bubbleTargetPosition = null;
+let bubblePosition = null;
+let bubbleVelocity = 0;
+let bubbleAnimatedAt = null;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
@@ -744,7 +739,7 @@ function analyseFrame(now) {
       folded: false,
     });
   } finally {
-    animateNeedle(now);
+    animateBubble(now);
     // Invalid or temporarily unavailable input must never kill the active loop.
     scheduleAnalysisFrame();
   }
@@ -957,8 +952,10 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
 
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
-  elements.gaugeCents.textContent = centsText;
-  needleTargetCents = gaugeCents;
+  elements.gaugeCents.textContent = displayTuned
+    ? "\u2713"
+    : formatBubbleCents(displayedCentsInt);
+  renderGaugeValue(gaugeCents);
   elements.pitchMeter.setAttribute("aria-valuenow", gaugeCents.toFixed(1));
   elements.pitchMeter.setAttribute(
     "aria-valuetext",
@@ -973,7 +970,9 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   elements.tunerMain.dataset.direction = direction;
   setHiddenState(elements.gaugeHintUp, direction !== "flat");
   setHiddenState(elements.gaugeHintDown, direction !== "sharp");
-  setHiddenState(elements.gaugeHintCheck, direction !== "tuned");
+  // The bubble itself turns into the green check; a second check on top
+  // would be redundant.
+  setHiddenState(elements.gaugeHintCheck, true);
   const statusText = displayTuned ? "ぴったり" : direction === "flat" ? "低い（上げる）" : "高い（下げる）";
   if (elements.tuneStatus.textContent !== statusText) {
     elements.tuneStatus.textContent = statusText;
@@ -1131,10 +1130,10 @@ function resetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
-  needleTargetCents = null;
-  needleDrawnCents = null;
-  elements.gaugeNeedle.setAttribute("hidden", "");
-  elements.gaugeMarker.setAttribute("hidden", "");
+  bubbleTargetPosition = null;
+  bubblePosition = null;
+  bubbleVelocity = 0;
+  elements.gaugeBubble.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "音程未検出");
   elements.tunerMain.dataset.signal = "empty";
@@ -1183,54 +1182,46 @@ function clearPitchHistory({ clearStableValue }) {
 }
 
 function initializeGauge() {
-  elements.gaugeTrack.setAttribute(
-    "d",
-    arcPath(-CONFIG.meterRangeCents, CONFIG.meterRangeCents, GAUGE.radius),
-  );
+  const laneLeft = GAUGE.centerX - GAUGE.halfSpanX;
+  const laneRight = GAUGE.centerX + GAUGE.halfSpanX;
+  elements.gaugeLane.setAttribute("x1", String(laneLeft));
+  elements.gaugeLane.setAttribute("x2", String(laneRight));
+  elements.gaugeLane.setAttribute("y1", String(GAUGE.laneY));
+  elements.gaugeLane.setAttribute("y2", String(GAUGE.laneY));
 
-  // Colored zones make the goal visible before the needle reaches it:
-  // green = in tune (chime range), amber = almost there.
-  const zones = document.createDocumentFragment();
-  for (const { from, to, className } of [
-    { from: -CONFIG.nearTuneCents, to: -CONFIG.inTuneCents, className: "gauge-zone-near" },
-    { from: -CONFIG.inTuneCents, to: CONFIG.inTuneCents, className: "gauge-zone-fine" },
-    { from: CONFIG.inTuneCents, to: CONFIG.nearTuneCents, className: "gauge-zone-near" },
-  ]) {
-    const zone = document.createElementNS(SVG_NAMESPACE, "path");
-    zone.setAttribute("d", arcPath(from, to, GAUGE.radius));
-    zone.setAttribute("class", className);
-    zones.append(zone);
-  }
-  elements.gaugeZones.replaceChildren(zones);
+  // The green zone shows the goal before the bubble reaches it.
+  elements.gaugeZoneFine.setAttribute("x1", laneX(-CONFIG.inTuneCents).toFixed(1));
+  elements.gaugeZoneFine.setAttribute("x2", laneX(CONFIG.inTuneCents).toFixed(1));
+  elements.gaugeZoneFine.setAttribute("y1", String(GAUGE.laneY));
+  elements.gaugeZoneFine.setAttribute("y2", String(GAUGE.laneY));
+
+  elements.gaugeNotch.setAttribute("x1", String(GAUGE.centerX));
+  elements.gaugeNotch.setAttribute("x2", String(GAUGE.centerX));
+  elements.gaugeNotch.setAttribute("y1", String(GAUGE.laneY - 14));
+  elements.gaugeNotch.setAttribute("y2", String(GAUGE.laneY + 14));
 
   const fragment = document.createDocumentFragment();
   for (const { cents, rank } of GAUGE.ticks) {
-    for (const sign of cents === 0 ? [1] : [-1, 1]) {
-      const signedCents = sign * cents;
-      const length = rank === "major" ? 11 : rank === "medium" ? 7 : 4;
-      const width = rank === "major" ? 1.8 : 1;
-      const opacity = rank === "major" ? 0.45 : rank === "medium" ? 0.22 : 0.11;
-      const outer = pt(signedCents, GAUGE.tickOuterRadius);
-      const inner = pt(signedCents, GAUGE.tickOuterRadius - length);
+    for (const sign of [-1, 1]) {
+      const x = laneX(sign * cents).toFixed(1);
+      const length = rank === "major" ? 7 : 5;
       const tick = document.createElementNS(SVG_NAMESPACE, "line");
-
-      tick.setAttribute("x1", outer[0].toFixed(1));
-      tick.setAttribute("y1", outer[1].toFixed(1));
-      tick.setAttribute("x2", inner[0].toFixed(1));
-      tick.setAttribute("y2", inner[1].toFixed(1));
+      tick.setAttribute("x1", x);
+      tick.setAttribute("x2", x);
+      tick.setAttribute("y1", String(GAUGE.laneY - length));
+      tick.setAttribute("y2", String(GAUGE.laneY + length));
       tick.setAttribute("stroke", "#ffffff");
-      tick.setAttribute("stroke-width", String(width));
-      tick.setAttribute("opacity", String(opacity));
+      tick.setAttribute("stroke-width", "1");
+      tick.setAttribute("opacity", rank === "major" ? "0.35" : "0.18");
       fragment.append(tick);
     }
   }
 
-  // ♭/♯ anchors tell which side is which even before any instruction shows.
-  for (const [cents, symbol] of [[-CONFIG.meterRangeCents, "♭"], [CONFIG.meterRangeCents, "♯"]]) {
-    const [x, y] = pt(cents, GAUGE.tickOuterRadius - 22);
+  // ♭/♯ anchors tell which side is which without a single word.
+  for (const [sign, symbol] of [[-1, "♭"], [1, "♯"]]) {
     const label = document.createElementNS(SVG_NAMESPACE, "text");
-    label.setAttribute("x", x.toFixed(1));
-    label.setAttribute("y", y.toFixed(1));
+    label.setAttribute("x", String(GAUGE.centerX + sign * GAUGE.halfSpanX));
+    label.setAttribute("y", String(GAUGE.laneY + 28));
     label.setAttribute("class", "gauge-end-label");
     label.textContent = symbol;
     fragment.append(label);
@@ -1239,67 +1230,60 @@ function initializeGauge() {
   elements.gaugeTicks.replaceChildren(fragment);
 }
 
-// Piecewise-linear mapping: the inner ±meterLinearCents take half the dial,
-// the rest is compressed into the outer half. Fine tuning stays readable and,
-// unlike a square-root scale, the gain near zero is finite, so measurement
-// wobble is not visually magnified at the very moment precision matters.
-function pt(cents, radius) {
+// Piecewise-linear mapping to [-1, 1]: the inner ±meterLinearCents take half
+// the lane, the rest is compressed into the outer half. Fine tuning stays
+// readable and, unlike a square-root scale, the gain near zero is finite, so
+// measurement wobble is not visually magnified where precision matters.
+function lanePosition(cents) {
   const absCents = Math.min(Math.abs(cents), CONFIG.meterRangeCents);
   const linear = CONFIG.meterLinearCents;
-  const normalized = Math.sign(cents) * (
+  return Math.sign(cents) * (
     absCents <= linear
       ? (absCents / linear) * 0.5
       : 0.5 + ((absCents - linear) / (CONFIG.meterRangeCents - linear)) * 0.5
   );
-  const angle = normalized * GAUGE.angleRangeDegrees * Math.PI / 180;
-  return [
-    GAUGE.centerX + radius * Math.sin(angle),
-    GAUGE.centerY - radius * Math.cos(angle),
-  ];
 }
 
-function arcPath(startCents, endCents, radius) {
-  const start = pt(startCents, radius);
-  const end = pt(endCents, radius);
-  const sweep = endCents > startCents ? 1 : 0;
-  return `M${start[0].toFixed(1)} ${start[1].toFixed(1)}A${radius} ${radius} 0 0 ${sweep} ${end[0].toFixed(1)} ${end[1].toFixed(1)}`;
+function laneX(cents) {
+  return GAUGE.centerX + lanePosition(cents) * GAUGE.halfSpanX;
 }
 
 
-function animateNeedle(now) {
-  if (needleTargetCents === null) {
-    if (needleDrawnCents !== null) {
-      needleDrawnCents = null;
-      elements.gaugeNeedle.setAttribute("hidden", "");
-      elements.gaugeMarker.setAttribute("hidden", "");
+function animateBubble(now) {
+  if (bubbleTargetPosition === null) {
+    if (bubblePosition !== null) {
+      bubblePosition = null;
+      bubbleVelocity = 0;
+      elements.gaugeBubble.setAttribute("hidden", "");
     }
-    needleAnimatedAt = now;
+    bubbleAnimatedAt = now;
     return;
   }
-  if (needleDrawnCents === null) {
-    needleDrawnCents = needleTargetCents;
+  const deltaSeconds = Math.min(
+    0.05,
+    Math.max(0, now - (bubbleAnimatedAt ?? now)) / 1000,
+  );
+  bubbleAnimatedAt = now;
+  if (bubblePosition === null) {
+    bubblePosition = bubbleTargetPosition;
+    bubbleVelocity = 0;
   } else {
-    const deltaMs = Math.max(0, now - (needleAnimatedAt ?? now));
-    const alpha = 1 - Math.exp(-deltaMs / CONFIG.needleAnimTauMs);
-    needleDrawnCents += (needleTargetCents - needleDrawnCents) * alpha;
+    // Critically-damped spring: physical inertia is what makes the motion
+    // read as organic instead of stepped.
+    const omega = CONFIG.bubbleSpringOmega;
+    const acceleration =
+      omega * omega * (bubbleTargetPosition - bubblePosition) -
+      2 * CONFIG.bubbleSpringZeta * omega * bubbleVelocity;
+    bubbleVelocity += acceleration * deltaSeconds;
+    bubblePosition += bubbleVelocity * deltaSeconds;
   }
-  needleAnimatedAt = now;
-  renderGaugeValue(needleDrawnCents);
+  const x = (GAUGE.centerX + bubblePosition * GAUGE.halfSpanX).toFixed(1);
+  elements.gaugeBubble.setAttribute("transform", `translate(${x} ${GAUGE.laneY})`);
+  elements.gaugeBubble.removeAttribute("hidden");
 }
 
 function renderGaugeValue(cents) {
-  const tip = pt(cents, GAUGE.radius);
-  const needleOuter = pt(cents, GAUGE.needleOuterRadius);
-  const needleInner = pt(cents, GAUGE.needleInnerRadius);
-
-  elements.gaugeNeedle.setAttribute("x1", needleInner[0].toFixed(1));
-  elements.gaugeNeedle.setAttribute("y1", needleInner[1].toFixed(1));
-  elements.gaugeNeedle.setAttribute("x2", needleOuter[0].toFixed(1));
-  elements.gaugeNeedle.setAttribute("y2", needleOuter[1].toFixed(1));
-  elements.gaugeNeedle.removeAttribute("hidden");
-  elements.gaugeMarker.setAttribute("cx", tip[0].toFixed(1));
-  elements.gaugeMarker.setAttribute("cy", tip[1].toFixed(1));
-  elements.gaugeMarker.removeAttribute("hidden");
+  bubbleTargetPosition = lanePosition(cents);
 }
 
 function renderNoTargetDisplay() {
@@ -1310,10 +1294,10 @@ function renderNoTargetDisplay() {
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
   displayedCentsInt = null;
-  needleTargetCents = null;
-  needleDrawnCents = null;
-  elements.gaugeNeedle.setAttribute("hidden", "");
-  elements.gaugeMarker.setAttribute("hidden", "");
+  bubbleTargetPosition = null;
+  bubblePosition = null;
+  bubbleVelocity = 0;
+  elements.gaugeBubble.setAttribute("hidden", "");
   hideTuneHints();
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "該当する弦なし");
@@ -1717,6 +1701,12 @@ function jitterCents(history) {
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function formatBubbleCents(cents) {
+  const normalized = Object.is(cents, -0) ? 0 : cents;
+  if (normalized < 0) return `\u2212${Math.abs(normalized)}`;
+  return normalized > 0 ? `+${normalized}` : "0";
 }
 
 function formatCents(cents) {
