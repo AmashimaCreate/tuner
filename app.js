@@ -41,6 +41,14 @@ const CONFIG = {
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
   displayHoldMs: 1500,
+  // A pluck physically starts 10-16 cents sharp and glides down as the
+  // transient decays. The needle freezes for this long after an attack and
+  // the measurements are discarded, so the excursion is never drawn; the
+  // residual offset once the blank ends measures under 4 cents.
+  attackBlankMs: 180,
+  attackSurgeRatio: 3,
+  attackSurgeMinRms: 0.002,
+  attackRmsTauMs: 250,
   // Two-speed display smoothing: fast while the pitch is moving (a peg turn
   // must feel immediate), slow once it has almost settled. A median-of-5
   // prefilter absorbs single-frame spikes, and the needle only moves for
@@ -265,6 +273,9 @@ let lastDisplayAt = null;
 const displayCentsBuffer = [];
 let lastNeedleCents = null;
 let displayTuned = false;
+let attackBlankUntil = -Infinity;
+let slowRms = null;
+let slowRmsUpdatedAt = null;
 let lastStableHz = null;
 let lastMeasuredRms = Number.NaN;
 let lastPitchCorrection = "—";
@@ -735,6 +746,22 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
 
   if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
 
+  // Re-plucking a still-ringing string never leaves TRACKING, so the attack
+  // is caught by the sudden energy jump rather than a tracker event.
+  if (Number.isFinite(rms)) {
+    if (
+      slowRms !== null &&
+      rms >= CONFIG.attackSurgeMinRms &&
+      rms >= CONFIG.attackSurgeRatio * slowRms
+    ) {
+      startAttackBlank(now);
+    }
+    const deltaMs = slowRmsUpdatedAt === null ? 0 : Math.max(0, now - slowRmsUpdatedAt);
+    const alpha = 1 - Math.exp(-deltaMs / CONFIG.attackRmsTauMs);
+    slowRms = slowRms === null ? rms : alpha * rms + (1 - alpha) * slowRms;
+    slowRmsUpdatedAt = now;
+  }
+
   const result = pitchTracker.update({
     hz: signalUsable ? rawHz : Number.NaN,
     clarity: signalUsable ? clarity : Number.NaN,
@@ -745,6 +772,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   if (result.accepted && Number.isFinite(result.valueHz)) {
     const stableHz = result.valueHz;
     const reselectString = result.event === "acquired" || result.event === "switched";
+    if (reselectString) startAttackBlank(now);
     // A fresh acquisition after silence is a new note: the sticky bias that
     // protects a bent note mid-tracking must not carry over from before the
     // release, or a detuned string could keep the previous peg lit.
@@ -755,7 +783,11 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     lastPitchCorrection = folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
-    updateDisplay(stableHz, now, { reselectString, refinedHz });
+    updateDisplay(stableHz, now, {
+      reselectString,
+      refinedHz,
+      attackBlanked: now <= attackBlankUntil,
+    });
   } else if (result.event === "released") {
     // Keep the last reading visible but dimmed for a short while: a plucked
     // string fading out should not blank the tuner the player is reading.
@@ -795,7 +827,15 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   });
 }
 
-function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN } = {}) {
+function startAttackBlank(now) {
+  attackBlankUntil = now + CONFIG.attackBlankMs;
+  // The excursion samples must not seed the post-blank display.
+  displayCentsBuffer.length = 0;
+  smoothedCents = null;
+  lastDisplayAt = null;
+}
+
+function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN, attackBlanked = false } = {}) {
   // The fine measurement is trusted only while it agrees with the tracker;
   // during fast changes the long window smears and the tracker leads.
   const displayHz =
@@ -831,6 +871,18 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   }
 
   const { midi } = measurement;
+
+  // While the attack transient is blanked, keep identification current (note
+  // name, peg) but freeze the needle and drop the biased measurements.
+  if (attackBlanked) {
+    const blankNoteIndex = ((midi % NOTE_NAMES.length) + NOTE_NAMES.length) % NOTE_NAMES.length;
+    elements.gaugeNote.textContent = NOTE_NAMES[blankNoteIndex];
+    elements.gaugeOctave.textContent = String(Math.floor(midi / NOTE_NAMES.length) - 1);
+    elements.tunerMain.dataset.signal = "active";
+    previousMidi = midi;
+    updateDebugPanel({ stableHz, midi, cents: smoothedCents });
+    return;
+  }
 
   if (midi !== previousMidi) displayCentsBuffer.length = 0;
   displayCentsBuffer.push(measurement.cents);
@@ -1078,6 +1130,9 @@ function resetDetectionData() {
   inTuneSince = null;
   displayHoldUntil = null;
   reselectFramesLeft = 0;
+  attackBlankUntil = -Infinity;
+  slowRms = null;
+  slowRmsUpdatedAt = null;
   lastPitchCorrection = "—";
   lastMeasuredRms = Number.NaN;
 }
