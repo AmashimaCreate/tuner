@@ -35,6 +35,10 @@ try {
     assert.equal(state.activePeg, String(testCase.peg), testCase.name);
     assert.notEqual(state.activePeg, String(testCase.forbiddenPeg), testCase.name);
     assert.equal(state.correction, "×1", `${testCase.name}: no harmonic correction`);
+    // All three presets sit 200 cents flat: the meter must tell the player
+    // what to do about it, not just show a needle.
+    assert.equal(state.direction, "flat", `${testCase.name}: direction`);
+    assert.equal(state.action, "低い ▲ 上げて", `${testCase.name}: action text`);
     assertOnlyExpectedPegs(
       await readUiTrace(fixture.page),
       [testCase.peg],
@@ -596,6 +600,8 @@ async function readState(page) {
     clarity: Number(document.querySelector("#debugClarity")?.textContent),
     rms: Number(document.querySelector("#debugRms")?.textContent),
     correction: document.querySelector("#debugCorrection")?.textContent ?? "",
+    direction: document.querySelector("#tunerMain")?.dataset.direction ?? "",
+    action: document.querySelector("#gaugeAction")?.textContent ?? "",
     trackerState: document.querySelector("#tunerMain")?.dataset.trackerState ?? "",
     tracker: document.querySelector("#debugTracker")?.textContent ?? "",
     inputBlanked: document.querySelector("#tunerMain")?.dataset.inputBlanked ?? "false",

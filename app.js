@@ -20,7 +20,11 @@ const CONFIG = {
   acquireStabilityCents: 45,
   candidateMaxGapMs: 90,
   trackMedianWindow: 3,
-  trackMaxStepCents: 150,
+  // Per-frame step limit while tracking. Real vibrato and bends move well
+  // under 40 cents per animation frame; a fast string change sweeps the
+  // analysis window at 100+ cents per frame and must register as a switch
+  // (which re-runs string selection), not as an in-note glide.
+  trackMaxStepCents: 70,
   switchMinMs: 30,
   switchMinSamples: 2,
   switchStabilityCents: 55,
@@ -29,6 +33,12 @@ const CONFIG = {
   octaveSwitchMinMs: 220,
   octaveToleranceCents: 120,
   releaseMs: 220,
+  // A confirmed switch reports the switch cluster's median, which can lag a
+  // fast pitch change by 10-20 cents and land a boundary case on the wrong
+  // side of the sticky margin. String selection therefore also re-evaluates
+  // on the next few accepted frames, where the tracked value has settled —
+  // but no longer, so a subsequent in-note glide stays locked to its string.
+  reselectFrames: 3,
   displayHoldMs: 1500,
   smoothingMoveTauMs: 65,
   smoothingFineTauMs: 110,
@@ -37,11 +47,20 @@ const CONFIG = {
   jitterWindowMs: 1000,
   jitterMinSamples: 8,
   inTuneCents: 5,
+  nearTuneCents: 15,
   meterRangeCents: 50,
-  minPitchHz: 60,
+  // 62 keeps 60 Hz mains hum outside the pitch range while every listed
+  // tuning's lowest string (C2 = 65.4 Hz) stays detectable down to -80 cents.
+  minPitchHz: 62,
   maxPitchHz: 1200,
   highpassHz: 35,
   lowpassHz: 1500,
+  // Mains hum (50 Hz east Japan / 60 Hz west Japan) and its strong partials
+  // sit inside the low-string analysis band and can out-correlate a decaying
+  // string, silencing the low E entirely. Q=35 notches are narrow enough to
+  // leave every open-string fundamental within 2 dB.
+  humNotchHz: [50, 60, 100, 120, 150, 180],
+  humNotchQ: 35,
   fftSize: 2048,
   concertAHz: 440,
   concertAMin: 415,
@@ -54,7 +73,12 @@ const CONFIG = {
   chimeBlankingMs: 500,
   midiA4: 69,
   stringMatchMaxCents: 600,
-  stickyMarginCents: 80,
+  // Hysteresis for auto string selection: another target must be this much
+  // closer before the peg moves. It only needs to beat measurement jitter
+  // (±10 cents); adjacent strings are 400+ cents apart, and the measured
+  // value can sit 15-25 cents shy of its settled pitch right after a fast
+  // change, so a large margin would eat real string changes near midpoints.
+  stickyMarginCents: 55,
   mutedTrackFallbackMs: 500,
   resumeTimeoutMs: 5000,
 };
@@ -113,9 +137,23 @@ const GAUGE = {
   centerY: 140,
   radius: 100,
   angleRangeDegrees: 70,
-  tickStepCents: 2.5,
   tickOuterRadius: 92,
-  nearZeroCents: 1.2,
+  needleInnerRadius: 62,
+  needleOuterRadius: 94,
+  // Square-root scale: ticks at these cents, sized by rank. The in-tune band
+  // (±5¢) occupies almost a third of each half-dial, so the last fine push is
+  // readable instead of being a two-pixel sliver near the centre.
+  ticks: [
+    { cents: 0, rank: "major" },
+    { cents: 5, rank: "medium" },
+    { cents: 10, rank: "minor" },
+    { cents: 15, rank: "medium" },
+    { cents: 20, rank: "minor" },
+    { cents: 25, rank: "medium" },
+    { cents: 30, rank: "minor" },
+    { cents: 40, rank: "minor" },
+    { cents: 50, rank: "major" },
+  ],
 };
 const GET_USER_MEDIA_CONSTRAINTS = {
   audio: {
@@ -148,12 +186,13 @@ const elements = {
   headstockImage: document.querySelector("#headstock-image"),
   gaugeTrack: document.querySelector("#gaugeTrack"),
   gaugeTicks: document.querySelector("#gaugeTicks"),
-  gaugeDeviation: document.querySelector("#gaugeDeviation"),
+  gaugeZones: document.querySelector("#gaugeZones"),
+  gaugeNeedle: document.querySelector("#gaugeNeedle"),
   gaugeMarker: document.querySelector("#gaugeMarker"),
   gaugeNote: document.querySelector("#gaugeNote"),
   gaugeOctave: document.querySelector("#gaugeOctave"),
   gaugeCents: document.querySelector("#gaugeCents"),
-  gaugeTunedText: document.querySelector("#gaugeTunedText"),
+  gaugeAction: document.querySelector("#gaugeAction"),
   tuneStatus: document.querySelector("#tuneStatus"),
   pitchMeter: document.querySelector("#pitchMeter"),
   micButton: document.querySelector("#micButton"),
@@ -180,6 +219,7 @@ let audioContext = null;
 let mediaStream = null;
 let sourceNode = null;
 let highpassNode = null;
+let notchNodes = [];
 let lowpassNode = null;
 let analyserNode = null;
 let muteGainNode = null;
@@ -213,6 +253,7 @@ let inTuneSince = null;
 let lastChimeAt = -Infinity;
 let analysisBlankedUntil = -Infinity;
 let displayHoldUntil = null;
+let reselectFramesLeft = 0;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
 
@@ -369,6 +410,7 @@ async function startMicrophoneFromGesture() {
   let nextStream = null;
   let nextSource = null;
   let nextHighpass = null;
+  let nextNotches = [];
   let nextLowpass = null;
   let nextAnalyser = null;
   let nextMuteGain = null;
@@ -391,6 +433,14 @@ async function startMicrophoneFromGesture() {
     nextHighpass.type = "highpass";
     nextHighpass.frequency.value = CONFIG.highpassHz;
 
+    nextNotches = CONFIG.humNotchHz.map((notchHz) => {
+      const notch = nextContext.createBiquadFilter();
+      notch.type = "notch";
+      notch.frequency.value = notchHz;
+      notch.Q.value = CONFIG.humNotchQ;
+      return notch;
+    });
+
     nextLowpass = nextContext.createBiquadFilter();
     nextLowpass.type = "lowpass";
     nextLowpass.frequency.value = CONFIG.lowpassHz;
@@ -403,7 +453,12 @@ async function startMicrophoneFromGesture() {
     nextMuteGain.gain.value = 0;
 
     nextSource.connect(nextHighpass);
-    nextHighpass.connect(nextLowpass);
+    let previousNode = nextHighpass;
+    for (const notch of nextNotches) {
+      previousNode.connect(notch);
+      previousNode = notch;
+    }
+    previousNode.connect(nextLowpass);
     nextLowpass.connect(nextAnalyser);
     nextAnalyser.connect(nextMuteGain);
     nextMuteGain.connect(nextContext.destination);
@@ -417,7 +472,7 @@ async function startMicrophoneFromGesture() {
       await releaseAudioResources({
         context: nextContext,
         stream: nextStream,
-        nodes: [nextSource, nextHighpass, nextLowpass, nextAnalyser, nextMuteGain],
+        nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextMuteGain],
       });
       return;
     }
@@ -426,6 +481,7 @@ async function startMicrophoneFromGesture() {
     mediaStream = nextStream;
     sourceNode = nextSource;
     highpassNode = nextHighpass;
+    notchNodes = nextNotches;
     lowpassNode = nextLowpass;
     analyserNode = nextAnalyser;
     muteGainNode = nextMuteGain;
@@ -452,7 +508,7 @@ async function startMicrophoneFromGesture() {
     await releaseAudioResources({
       context: nextContext,
       stream: nextStream,
-      nodes: [nextSource, nextHighpass, nextLowpass, nextAnalyser, nextMuteGain],
+      nodes: [nextSource, nextHighpass, ...nextNotches, nextLowpass, nextAnalyser, nextMuteGain],
     });
 
     if (generation !== lifecycleGeneration) return;
@@ -476,7 +532,7 @@ function stopMicrophone() {
   const resources = {
     context: audioContext,
     stream: mediaStream,
-    nodes: [sourceNode, highpassNode, lowpassNode, analyserNode, muteGainNode],
+    nodes: [sourceNode, highpassNode, ...notchNodes, lowpassNode, analyserNode, muteGainNode],
     endedHandler: trackEndedHandler,
   };
 
@@ -484,6 +540,7 @@ function stopMicrophone() {
   mediaStream = null;
   sourceNode = null;
   highpassNode = null;
+  notchNodes = [];
   lowpassNode = null;
   analyserNode = null;
   muteGainNode = null;
@@ -690,8 +747,10 @@ function updateDisplay(stableHz, now, { reselectString = false } = {}) {
   if (currentTuning.notes === null) {
     measurement = analyzePitch(stableHz);
   } else {
-    if (manualString === null && reselectString && updateAutoString(stableHz)) {
-      renderHeadstock();
+    if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
+    if (manualString === null && reselectFramesLeft > 0) {
+      reselectFramesLeft -= 1;
+      if (updateAutoString(stableHz)) renderHeadstock();
     }
 
     const stringIndex = activeString();
@@ -749,10 +808,18 @@ function updateDisplay(stableHz, now, { reselectString = false } = {}) {
   );
   elements.tunerMain.dataset.signal = "active";
   elements.tunerMain.dataset.tuned = String(inTune);
-  const tuneStatusText = inTune ? "✓ 合っている" : "";
-  elements.gaugeTunedText.textContent = tuneStatusText;
-  if (elements.tuneStatus.textContent !== tuneStatusText) {
-    elements.tuneStatus.textContent = tuneStatusText;
+
+  // Tell the player what to DO, not just where the needle is.
+  const direction = inTune ? "tuned" : smoothedCents < 0 ? "flat" : "sharp";
+  const actionText = inTune
+    ? "✓ ぴったり！"
+    : direction === "flat"
+      ? "低い ▲ 上げて"
+      : "高い ▼ 下げて";
+  elements.tunerMain.dataset.direction = direction;
+  elements.gaugeAction.textContent = actionText;
+  if (elements.tuneStatus.textContent !== actionText) {
+    elements.tuneStatus.textContent = actionText;
   }
 
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
@@ -889,13 +956,14 @@ function resetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
-  elements.gaugeDeviation.setAttribute("hidden", "");
+  elements.gaugeNeedle.setAttribute("hidden", "");
   elements.gaugeMarker.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "音程未検出");
   elements.tunerMain.dataset.signal = "empty";
   elements.tunerMain.dataset.tuned = "false";
-  elements.gaugeTunedText.textContent = "";
+  elements.tunerMain.dataset.direction = "none";
+  elements.gaugeAction.textContent = "弦を鳴らしてください";
   if (elements.tuneStatus.textContent) elements.tuneStatus.textContent = "";
   renderHeadstock();
 }
@@ -907,6 +975,7 @@ function resetDetectionData() {
   autoString = -1;
   inTuneSince = null;
   displayHoldUntil = null;
+  reselectFramesLeft = 0;
   lastPitchCorrection = "—";
   lastMeasuredRms = Number.NaN;
 }
@@ -934,39 +1003,63 @@ function initializeGauge() {
     arcPath(-CONFIG.meterRangeCents, CONFIG.meterRangeCents, GAUGE.radius),
   );
 
-  const fragment = document.createDocumentFragment();
-  for (
-    let cents = -CONFIG.meterRangeCents;
-    cents <= CONFIG.meterRangeCents;
-    cents += GAUGE.tickStepCents
-  ) {
-    const major = isMultipleOf(cents, 25);
-    const medium = !major && isMultipleOf(cents, 5);
-    const length = major ? 11 : medium ? 6 : 3.5;
-    const width = major ? 1.8 : 1;
-    const opacity = major ? 0.4 : medium ? 0.19 : 0.1;
-    const outer = pt(cents, GAUGE.tickOuterRadius);
-    const inner = pt(cents, GAUGE.tickOuterRadius - length);
-    const tick = document.createElementNS(SVG_NAMESPACE, "line");
+  // Colored zones make the goal visible before the needle reaches it:
+  // green = in tune (chime range), amber = almost there.
+  const zones = document.createDocumentFragment();
+  for (const { from, to, className } of [
+    { from: -CONFIG.nearTuneCents, to: -CONFIG.inTuneCents, className: "gauge-zone-near" },
+    { from: -CONFIG.inTuneCents, to: CONFIG.inTuneCents, className: "gauge-zone-fine" },
+    { from: CONFIG.inTuneCents, to: CONFIG.nearTuneCents, className: "gauge-zone-near" },
+  ]) {
+    const zone = document.createElementNS(SVG_NAMESPACE, "path");
+    zone.setAttribute("d", arcPath(from, to, GAUGE.radius));
+    zone.setAttribute("class", className);
+    zones.append(zone);
+  }
+  elements.gaugeZones.replaceChildren(zones);
 
-    tick.setAttribute("x1", outer[0].toFixed(1));
-    tick.setAttribute("y1", outer[1].toFixed(1));
-    tick.setAttribute("x2", inner[0].toFixed(1));
-    tick.setAttribute("y2", inner[1].toFixed(1));
-    tick.setAttribute("stroke", "#ffffff");
-    tick.setAttribute("stroke-width", String(width));
-    tick.setAttribute("opacity", String(opacity));
-    fragment.append(tick);
+  const fragment = document.createDocumentFragment();
+  for (const { cents, rank } of GAUGE.ticks) {
+    for (const sign of cents === 0 ? [1] : [-1, 1]) {
+      const signedCents = sign * cents;
+      const length = rank === "major" ? 11 : rank === "medium" ? 7 : 4;
+      const width = rank === "major" ? 1.8 : 1;
+      const opacity = rank === "major" ? 0.45 : rank === "medium" ? 0.22 : 0.11;
+      const outer = pt(signedCents, GAUGE.tickOuterRadius);
+      const inner = pt(signedCents, GAUGE.tickOuterRadius - length);
+      const tick = document.createElementNS(SVG_NAMESPACE, "line");
+
+      tick.setAttribute("x1", outer[0].toFixed(1));
+      tick.setAttribute("y1", outer[1].toFixed(1));
+      tick.setAttribute("x2", inner[0].toFixed(1));
+      tick.setAttribute("y2", inner[1].toFixed(1));
+      tick.setAttribute("stroke", "#ffffff");
+      tick.setAttribute("stroke-width", String(width));
+      tick.setAttribute("opacity", String(opacity));
+      fragment.append(tick);
+    }
+  }
+
+  // ♭/♯ anchors tell which side is which even before any instruction shows.
+  for (const [cents, symbol] of [[-CONFIG.meterRangeCents, "♭"], [CONFIG.meterRangeCents, "♯"]]) {
+    const [x, y] = pt(cents, GAUGE.tickOuterRadius - 22);
+    const label = document.createElementNS(SVG_NAMESPACE, "text");
+    label.setAttribute("x", x.toFixed(1));
+    label.setAttribute("y", y.toFixed(1));
+    label.setAttribute("class", "gauge-end-label");
+    label.textContent = symbol;
+    fragment.append(label);
   }
 
   elements.gaugeTicks.replaceChildren(fragment);
 }
 
+// Square-root mapping: |5¢| sits at 31.6% of the half-dial instead of 10%,
+// so fine tuning is readable while ±50¢ still fits.
 function pt(cents, radius) {
-  const angle =
-    (cents / CONFIG.meterRangeCents) *
-    GAUGE.angleRangeDegrees *
-    Math.PI / 180;
+  const normalized = Math.sign(cents) *
+    Math.sqrt(Math.abs(cents) / CONFIG.meterRangeCents);
+  const angle = normalized * GAUGE.angleRangeDegrees * Math.PI / 180;
   return [
     GAUGE.centerX + radius * Math.sin(angle),
     GAUGE.centerY - radius * Math.cos(angle),
@@ -980,23 +1073,20 @@ function arcPath(startCents, endCents, radius) {
   return `M${start[0].toFixed(1)} ${start[1].toFixed(1)}A${radius} ${radius} 0 0 ${sweep} ${end[0].toFixed(1)} ${end[1].toFixed(1)}`;
 }
 
-function isMultipleOf(value, divisor) {
-  return Math.abs(value / divisor - Math.round(value / divisor)) < Number.EPSILON * 10;
-}
 
 function renderGaugeValue(cents) {
-  const point = pt(cents, GAUGE.radius);
-  elements.gaugeMarker.setAttribute("cx", point[0].toFixed(1));
-  elements.gaugeMarker.setAttribute("cy", point[1].toFixed(1));
+  const tip = pt(cents, GAUGE.radius);
+  const needleOuter = pt(cents, GAUGE.needleOuterRadius);
+  const needleInner = pt(cents, GAUGE.needleInnerRadius);
+
+  elements.gaugeNeedle.setAttribute("x1", needleInner[0].toFixed(1));
+  elements.gaugeNeedle.setAttribute("y1", needleInner[1].toFixed(1));
+  elements.gaugeNeedle.setAttribute("x2", needleOuter[0].toFixed(1));
+  elements.gaugeNeedle.setAttribute("y2", needleOuter[1].toFixed(1));
+  elements.gaugeNeedle.removeAttribute("hidden");
+  elements.gaugeMarker.setAttribute("cx", tip[0].toFixed(1));
+  elements.gaugeMarker.setAttribute("cy", tip[1].toFixed(1));
   elements.gaugeMarker.removeAttribute("hidden");
-
-  if (Math.abs(cents) < GAUGE.nearZeroCents) {
-    elements.gaugeDeviation.setAttribute("hidden", "");
-    return;
-  }
-
-  elements.gaugeDeviation.setAttribute("d", arcPath(0, cents, GAUGE.radius));
-  elements.gaugeDeviation.removeAttribute("hidden");
 }
 
 function renderNoTargetDisplay() {
@@ -1006,13 +1096,14 @@ function renderNoTargetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
-  elements.gaugeDeviation.setAttribute("hidden", "");
+  elements.gaugeNeedle.setAttribute("hidden", "");
   elements.gaugeMarker.setAttribute("hidden", "");
-  elements.gaugeTunedText.textContent = "";
+  elements.gaugeAction.textContent = "対象の弦がありません";
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "該当する弦なし");
   elements.tunerMain.dataset.signal = "empty";
   elements.tunerMain.dataset.tuned = "false";
+  elements.tunerMain.dataset.direction = "none";
   if (elements.tuneStatus.textContent) elements.tuneStatus.textContent = "";
 }
 

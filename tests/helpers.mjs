@@ -95,6 +95,69 @@ export function addNoise(samples, snrDb, seed = 12345) {
   return out;
 }
 
+// RBJ-cookbook biquad, direct form 1 — mirrors the BiquadFilterNode types the
+// app builds its analysis chain from, so node tests can run the same graph.
+export function biquadFilter(samples, sampleRate, type, frequencyHz, q = 0.707) {
+  const w0 = (2 * Math.PI * frequencyHz) / sampleRate;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw0 = Math.cos(w0);
+  let b0;
+  let b1;
+  let b2;
+  if (type === "highpass") {
+    b0 = (1 + cosw0) / 2;
+    b1 = -(1 + cosw0);
+    b2 = (1 + cosw0) / 2;
+  } else if (type === "notch") {
+    b0 = 1;
+    b1 = -2 * cosw0;
+    b2 = 1;
+  } else {
+    throw new Error(`unsupported biquad type: ${type}`);
+  }
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosw0;
+  const a2 = 1 - alpha;
+
+  const out = new Float32Array(samples.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const x0 = samples[index];
+    const y0 = (b0 / a0) * x0 + (b1 / a0) * x1 + (b2 / a0) * x2 -
+      (a1 / a0) * y1 - (a2 / a0) * y2;
+    out[index] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+  return out;
+}
+
+// Mains hum with its strong low partials, scaled to a target RMS. Real rooms
+// put this straight into phone microphones and it sits inside the low-string
+// analysis band.
+export function addMainsHum(samples, sampleRate, mainsHz, humRms) {
+  const partials = [[mainsHz, 1], [mainsHz * 2, 0.6], [mainsHz * 3, 0.4]];
+  const norm = Math.sqrt(partials.reduce((sum, [, amp]) => sum + (amp * amp) / 2, 0));
+  const out = new Float32Array(samples.length);
+  for (let index = 0; index < samples.length; index += 1) {
+    let hum = 0;
+    const time = index / sampleRate;
+    for (const [hz, amp] of partials) {
+      hum += amp * Math.sin(2 * Math.PI * hz * time + hz);
+    }
+    out[index] = samples[index] + hum * (humRms / norm);
+  }
+  return out;
+}
+
+export function signalRms(samples) {
+  let power = 0;
+  for (const value of samples) power += value * value;
+  return Math.sqrt(power / samples.length);
+}
+
 export function mulberry32(seed) {
   return () => {
     let value = seed += 0x6d2b79f5;

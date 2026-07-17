@@ -4,12 +4,15 @@ import test from "node:test";
 
 import { GuitarPitchAnalyzer, PitchTracker, PITCH_TRACKER_STATES } from "../pitch-processing.js";
 import {
+  addMainsHum,
   addNoise,
+  biquadFilter,
   centsBetween,
   FIXTURE_E2_HZ,
   FIXTURE_URL,
   pitchShift,
   readMonoPcm16Wav,
+  signalRms,
 } from "./helpers.mjs";
 
 // Mirror of the runtime configuration in app.js. A drift between the two
@@ -24,7 +27,7 @@ const APP_CONFIG = {
   acquireStabilityCents: 45,
   candidateMaxGapMs: 90,
   trackMedianWindow: 3,
-  trackMaxStepCents: 150,
+  trackMaxStepCents: 70,
   switchMinMs: 30,
   switchMinSamples: 2,
   switchStabilityCents: 55,
@@ -33,10 +36,22 @@ const APP_CONFIG = {
   octaveSwitchMinMs: 220,
   octaveToleranceCents: 120,
   releaseMs: 220,
-  minPitchHz: 60,
+  minPitchHz: 62,
   maxPitchHz: 1200,
+  highpassHz: 35,
+  humNotchHz: [50, 60, 100, 120, 150, 180],
+  humNotchQ: 35,
   fftSize: 2048,
 };
+
+// The analysis chain the app builds in front of the analyser node.
+function applyAppInputChain(samples, sampleRate) {
+  let filtered = biquadFilter(samples, sampleRate, "highpass", APP_CONFIG.highpassHz);
+  for (const notchHz of APP_CONFIG.humNotchHz) {
+    filtered = biquadFilter(filtered, sampleRate, "notch", notchHz, APP_CONFIG.humNotchQ);
+  }
+  return filtered;
+}
 
 const STANDARD_STRINGS = [
   ["E2", FIXTURE_E2_HZ],
@@ -61,7 +76,7 @@ test("APP_CONFIG mirrors app.js CONFIG", () => {
   assert.ok(literal, "app.js must contain a CONFIG object literal");
   const appConfig = new Function(literal.replace("const CONFIG =", "return"))();
   for (const key of Object.keys(APP_CONFIG)) {
-    assert.equal(
+    assert.deepEqual(
       appConfig[key],
       APP_CONFIG[key],
       `app.js CONFIG.${key} drifted from the APP_CONFIG mirror in this test`,
@@ -189,10 +204,49 @@ test("behaviour does not depend on the animation frame rate", () => {
   }
 });
 
-// Emulates the runtime loop: an AnalyserNode-style sliding window over the
-// last fftSize samples, analysed once per animation frame and fed through
-// the same gating as app.js processTrackerFrame().
-function simulateTunerRun(samples, sampleRate, targetHz, fps) {
+// Mains hum (50 Hz in east Japan, 60 Hz in west) and its partials sit inside
+// the low-string analysis band and out-correlate a decaying string: this is
+// the audited "6th string barely responds" failure. The notch chain must keep
+// the low E usable, and the hum itself must never be displayed as a note.
+test("mains hum keeps the low E responsive and never displays the hum", () => {
+  const { sampleRate, samples } = readMonoPcm16Wav(FIXTURE_URL);
+  const humRms = signalRms(samples) / 4;
+
+  for (const mainsHz of [50, 60]) {
+    const noisy = addMainsHum(samples, sampleRate, mainsHz, humRms);
+    const report = simulateTunerRun(noisy, sampleRate, FIXTURE_E2_HZ, 60);
+
+    assert.deepEqual(report.wrongDisplays, [], `hum${mainsHz}: wrong pitch displayed`);
+    assert.ok(
+      report.trackedRatio >= 0.75,
+      `hum${mainsHz}: tracked only ${(report.trackedRatio * 100).toFixed(0)}%`,
+    );
+    // The onset marker fires on the hum itself ~1.1 s before the pluck, so
+    // this bound is loose; it still catches "never acquires" regressions.
+    assert.ok(
+      report.acquireMs !== null && report.acquireMs <= 1_400,
+      `hum${mainsHz}: expected acquisition, got ${report.acquireMs}`,
+    );
+
+    // Negative control: the notch chain is load-bearing for this guarantee.
+    const unprotected = simulateTunerRun(noisy, sampleRate, FIXTURE_E2_HZ, 60, {
+      applyInputChain: false,
+    });
+    assert.ok(
+      unprotected.trackedRatio <= report.trackedRatio - 0.25,
+      `hum${mainsHz}: expected the unfiltered pipeline to degrade, got ` +
+        `${(unprotected.trackedRatio * 100).toFixed(0)}% vs ${(report.trackedRatio * 100).toFixed(0)}%`,
+    );
+  }
+});
+
+// Emulates the runtime loop: the app's input filter chain, then an
+// AnalyserNode-style sliding window over the last fftSize samples, analysed
+// once per animation frame and fed through the same gating as app.js
+// processTrackerFrame(). Pass applyInputChain: false only to demonstrate what
+// the filters are protecting against.
+function simulateTunerRun(samples, sampleRate, targetHz, fps, { applyInputChain = true } = {}) {
+  if (applyInputChain) samples = applyAppInputChain(samples, sampleRate);
   const analyzer = new GuitarPitchAnalyzer(APP_CONFIG.fftSize, {
     minHz: APP_CONFIG.minPitchHz,
     maxHz: APP_CONFIG.maxPitchHz,

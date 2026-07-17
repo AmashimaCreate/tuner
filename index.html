@@ -384,16 +384,38 @@
         stroke-linecap: round;
       }
 
-      .gauge-deviation {
+      .gauge-zone-fine {
         fill: none;
-        stroke: var(--measure-color);
-        stroke-width: 4;
+        stroke: color-mix(in srgb, var(--tuned) 55%, transparent);
+        stroke-width: 6;
         stroke-linecap: round;
+      }
+
+      .gauge-zone-near {
+        fill: none;
+        stroke: color-mix(in srgb, var(--accent) 30%, transparent);
+        stroke-width: 4;
+      }
+
+      .gauge-needle {
+        stroke: var(--measure-color);
+        stroke-width: 3.5;
+        stroke-linecap: round;
+        transition: stroke 100ms ease;
+        filter: drop-shadow(0 0 4px color-mix(in srgb, var(--measure-color) 45%, transparent));
       }
 
       .gauge-marker {
         fill: var(--measure-color);
         filter: drop-shadow(0 0 5px color-mix(in srgb, var(--measure-color) 60%, transparent));
+      }
+
+      .gauge-end-label {
+        fill: rgb(255 255 255 / 38%);
+        font-size: 14px;
+        font-weight: 700;
+        text-anchor: middle;
+        dominant-baseline: middle;
       }
 
       .gauge-readout {
@@ -422,12 +444,22 @@
         font-weight: 720;
       }
 
-      .gauge-tuned-text {
-        fill: var(--tuned);
-        font-size: 11px;
+      .gauge-action {
+        fill: var(--measure-color);
+        font-size: 15px;
         font-weight: 800;
         text-anchor: middle;
-        letter-spacing: 0.04em;
+        letter-spacing: 0.06em;
+        transition: fill 100ms ease;
+      }
+
+      .tuner-main[data-signal="empty"] .gauge-action {
+        fill: var(--muted);
+        font-weight: 700;
+      }
+
+      .tuner-main[data-signal="dim"] .gauge-action {
+        opacity: 0.45;
       }
 
       .tuner-main[data-signal="dim"] .signal-dependent {
@@ -852,15 +884,16 @@
             aria-valuetext="音程未検出"
           >
             <path id="gaugeTrack" class="gauge-track" aria-hidden="true"></path>
+            <g id="gaugeZones" aria-hidden="true"></g>
             <g id="gaugeTicks" aria-hidden="true"></g>
-            <path id="gaugeDeviation" class="gauge-deviation signal-dependent" aria-hidden="true" hidden></path>
+            <line id="gaugeNeedle" class="gauge-needle signal-dependent" aria-hidden="true" hidden></line>
             <circle id="gaugeMarker" class="gauge-marker signal-dependent" r="5.5" aria-hidden="true" hidden></circle>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
               <text id="gaugeNote" class="gauge-note" x="140" y="108">—</text>
               <text id="gaugeOctave" class="gauge-octave" x="176" y="108"></text>
               <text id="gaugeCents" class="gauge-cents" x="140" y="134">—</text>
             </g>
-            <text id="gaugeTunedText" class="gauge-tuned-text signal-dependent" x="140" y="18" aria-hidden="true"></text>
+            <text id="gaugeAction" class="gauge-action" x="140" y="20" aria-hidden="true"></text>
           </svg>
           <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>
         </section>
