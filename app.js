@@ -13,7 +13,7 @@ const CONFIG = {
   // normal room the NSDF peak of a real string often sits between 0.6 and
   // 0.9, and the tracker's stability clustering rejects unstable input.
   clarityAcquireMin: 0.8,
-  clarityTrackMin: 0.6,
+  clarityTrackMin: 0.5,
   rmsAcquireMin: 0.0002,
   rmsTrackMin: 0.0001,
   acquireMinMs: 30,
@@ -276,6 +276,7 @@ let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 const displayCentsBuffer = [];
+let displayedCentsInt = null;
 let needleTargetCents = null;
 let needleDrawnCents = null;
 let needleAnimatedAt = null;
@@ -812,7 +813,9 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     displayHoldUntil = now + CONFIG.displayHoldMs;
     dimDisplay();
   } else if (result.state === PITCH_TRACKER_STATES.RELEASE) {
-    dimDisplay();
+    // Transient release episodes (clarity dipping for a few frames) keep the
+    // display fully lit; dimming only starts once the note actually ends.
+    // Flashing the whole gauge at the clarity boundary read as flutter.
     inTuneSince = null;
   } else if (result.event === "switch-pending") {
     // Hold the last trustworthy value while a new, distant cluster is checked.
@@ -931,7 +934,15 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     CONFIG.meterRangeCents,
   );
   const noteName = NOTE_NAMES[noteIndex];
-  const centsText = formatCents(smoothedCents);
+  // The printed number flips only when the value clearly leaves the shown
+  // integer; +-1 c wobble across a rounding boundary must not strobe the text.
+  if (
+    displayedCentsInt === null ||
+    Math.abs(smoothedCents - displayedCentsInt) > 0.7
+  ) {
+    displayedCentsInt = Math.round(smoothedCents);
+  }
+  const centsText = formatCents(displayedCentsInt);
 
   // Separate enter/leave thresholds so jitter at the boundary cannot strobe
   // the green state on and off.
@@ -1163,6 +1174,7 @@ function clearPitchHistory({ clearStableValue }) {
   rawHzHistory.length = 0;
   stableHzHistory.length = 0;
   displayCentsBuffer.length = 0;
+  displayedCentsInt = null;
   previousMidi = null;
   smoothedCents = null;
   lastDisplayAt = null;
@@ -1297,6 +1309,7 @@ function renderNoTargetDisplay() {
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
   elements.gaugeCents.textContent = "—";
+  displayedCentsInt = null;
   needleTargetCents = null;
   needleDrawnCents = null;
   elements.gaugeNeedle.setAttribute("hidden", "");

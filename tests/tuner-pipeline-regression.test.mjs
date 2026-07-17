@@ -19,7 +19,7 @@ import {
 // weakens this regression net, so keep them in sync when tuning the app.
 const APP_CONFIG = {
   clarityAcquireMin: 0.8,
-  clarityTrackMin: 0.6,
+  clarityTrackMin: 0.5,
   rmsAcquireMin: 0.0002,
   rmsTrackMin: 0.0001,
   acquireMinMs: 30,
