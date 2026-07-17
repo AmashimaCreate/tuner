@@ -1,35 +1,35 @@
-import { PitchDetector } from "./pitchy.js";
 import {
   centsBetween,
+  GuitarPitchAnalyzer,
   nearestStringIndex,
   PitchTracker,
   PITCH_TRACKER_STATES,
-  PITCHY_MPM_PEAK_THRESHOLD,
 } from "./pitch-processing.js";
 import { CATEGORIES, TUNINGS } from "./tunings.js";
 
 const CONFIG = {
-  // Pitchy's clarityThreshold is the MPM peak-picking coefficient, not the
-  // minimum returned clarity. Keep the two concepts separate.
-  // Near-maximum peak selection rejects the half-period peak produced by a
-  // strong second harmonic while remaining inside Pitchy's documented range.
-  mpmPeakThreshold: PITCHY_MPM_PEAK_THRESHOLD,
-  clarityAcquireMin: 0.9,
-  clarityTrackMin: 0.78,
+  // Clarity gates are deliberately permissive: on a phone microphone in a
+  // normal room the NSDF peak of a real string often sits between 0.6 and
+  // 0.9, and the tracker's stability clustering rejects unstable input.
+  clarityAcquireMin: 0.8,
+  clarityTrackMin: 0.6,
   rmsAcquireMin: 0.0002,
   rmsTrackMin: 0.0001,
-  acquireFrames: 3,
+  acquireMinMs: 30,
+  acquireMinSamples: 2,
   acquireStabilityCents: 45,
   candidateMaxGapMs: 90,
   trackMedianWindow: 3,
   trackMaxStepCents: 150,
-  switchFrames: 3,
+  switchMinMs: 30,
+  switchMinSamples: 2,
   switchStabilityCents: 55,
   switchCandidateMaxGapMs: 90,
-  octaveSwitchFrames: 5,
+  octaveSwitchMinSamples: 3,
   octaveSwitchMinMs: 220,
   octaveToleranceCents: 120,
   releaseMs: 220,
+  displayHoldMs: 1500,
   smoothingMoveTauMs: 65,
   smoothingFineTauMs: 110,
   smoothingFineRangeCents: 12,
@@ -183,7 +183,6 @@ let highpassNode = null;
 let lowpassNode = null;
 let analyserNode = null;
 let muteGainNode = null;
-let pitchDetector = null;
 let waveformBuffer = null;
 let animationFrameId = null;
 let microphoneActive = false;
@@ -213,21 +212,29 @@ let chimeArmed = true;
 let inTuneSince = null;
 let lastChimeAt = -Infinity;
 let analysisBlankedUntil = -Infinity;
+let displayHoldUntil = null;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
+
+const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
+  minHz: CONFIG.minPitchHz,
+  maxHz: CONFIG.maxPitchHz,
+});
 
 const pitchTracker = new PitchTracker({
   acquireClarityMin: CONFIG.clarityAcquireMin,
   trackClarityMin: CONFIG.clarityTrackMin,
-  acquireFrames: CONFIG.acquireFrames,
+  acquireMinMs: CONFIG.acquireMinMs,
+  acquireMinSamples: CONFIG.acquireMinSamples,
   acquireStabilityCents: CONFIG.acquireStabilityCents,
   candidateMaxGapMs: CONFIG.candidateMaxGapMs,
   medianWindow: CONFIG.trackMedianWindow,
   maxStepCents: CONFIG.trackMaxStepCents,
-  switchFrames: CONFIG.switchFrames,
+  switchMinMs: CONFIG.switchMinMs,
+  switchMinSamples: CONFIG.switchMinSamples,
   switchStabilityCents: CONFIG.switchStabilityCents,
   switchCandidateMaxGapMs: CONFIG.switchCandidateMaxGapMs,
-  octaveSwitchFrames: CONFIG.octaveSwitchFrames,
+  octaveSwitchMinSamples: CONFIG.octaveSwitchMinSamples,
   octaveSwitchMs: CONFIG.octaveSwitchMinMs,
   octaveToleranceCents: CONFIG.octaveToleranceCents,
   releaseMs: CONFIG.releaseMs,
@@ -401,8 +408,6 @@ async function startMicrophoneFromGesture() {
     nextAnalyser.connect(nextMuteGain);
     nextMuteGain.connect(nextContext.destination);
 
-    const nextDetector = PitchDetector.forFloat32Array(CONFIG.fftSize);
-    nextDetector.clarityThreshold = CONFIG.mpmPeakThreshold;
     const nextBuffer = new Float32Array(CONFIG.fftSize);
 
     // The permission sheet can suspend AudioContext on iOS, so resume again here.
@@ -424,7 +429,6 @@ async function startMicrophoneFromGesture() {
     lowpassNode = nextLowpass;
     analyserNode = nextAnalyser;
     muteGainNode = nextMuteGain;
-    pitchDetector = nextDetector;
     waveformBuffer = nextBuffer;
     microphoneActive = true;
     microphonePending = false;
@@ -483,7 +487,6 @@ function stopMicrophone() {
   lowpassNode = null;
   analyserNode = null;
   muteGainNode = null;
-  pitchDetector = null;
   waveformBuffer = null;
   trackEndedHandler = null;
 
@@ -564,7 +567,6 @@ function analyseFrame(now) {
     const inputReady =
       audioContext?.state === "running" &&
       analyserNode &&
-      pitchDetector &&
       waveformBuffer &&
       track?.readyState === "live" &&
       (!track.muted || now - microphoneStartedAt >= CONFIG.mutedTrackFallbackMs);
@@ -574,6 +576,7 @@ function analyseFrame(now) {
         rawHz: Number.NaN,
         clarity: Number.NaN,
         rms: Number.NaN,
+        folded: false,
       });
       return;
     }
@@ -582,13 +585,25 @@ function analyseFrame(now) {
     const rms = calculateRms(waveformBuffer);
     lastMeasuredRms = rms;
 
-    const [rawHz, clarity] = pitchDetector.findPitch(waveformBuffer, audioContext.sampleRate);
-    processTrackerFrame(now, { rawHz, clarity, rms });
+    // While a note is tracked, tell the analyzer so decaying input holds the
+    // tracked pitch instead of sliding onto a stronger subharmonic maximum.
+    const referenceHz =
+      pitchTracker.state === PITCH_TRACKER_STATES.TRACKING ||
+      pitchTracker.state === PITCH_TRACKER_STATES.RELEASE
+        ? pitchTracker.valueHz
+        : null;
+    const { hz: rawHz, clarity, folded } = pitchAnalyzer.analyze(
+      waveformBuffer,
+      audioContext.sampleRate,
+      { referenceHz },
+    );
+    processTrackerFrame(now, { rawHz, clarity, rms, folded });
   } catch {
     processTrackerFrame(now, {
       rawHz: Number.NaN,
       clarity: Number.NaN,
       rms: Number.NaN,
+      folded: false,
     });
   } finally {
     // Invalid or temporarily unavailable input must never kill the active loop.
@@ -596,7 +611,7 @@ function analyseFrame(now) {
   }
 }
 
-function processTrackerFrame(now, { rawHz, clarity, rms }) {
+function processTrackerFrame(now, { rawHz, clarity, rms, folded = false }) {
   const rawInRange =
     Number.isFinite(rawHz) &&
     rawHz >= CONFIG.minPitchHz &&
@@ -619,23 +634,44 @@ function processTrackerFrame(now, { rawHz, clarity, rms }) {
   if (result.accepted && Number.isFinite(result.valueHz)) {
     const stableHz = result.valueHz;
     const reselectString = result.event === "acquired" || result.event === "switched";
+    // A fresh acquisition after silence is a new note: the sticky bias that
+    // protects a bent note mid-tracking must not carry over from before the
+    // release, or a detuned string could keep the previous peg lit.
+    if (result.event === "acquired") autoString = -1;
+    displayHoldUntil = null;
     pushJitterSample(stableHzHistory, now, stableHz);
     lastStableHz = stableHz;
-    lastPitchCorrection = "×1";
+    lastPitchCorrection = folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
     updateDisplay(stableHz, now, { reselectString });
   } else if (result.event === "released") {
-    autoString = -1;
+    // Keep the last reading visible but dimmed for a short while: a plucked
+    // string fading out should not blank the tuner the player is reading.
     chimeArmed = true;
     inTuneSince = null;
-    resetDisplay();
+    displayHoldUntil = now + CONFIG.displayHoldMs;
+    dimDisplay();
   } else if (result.state === PITCH_TRACKER_STATES.RELEASE) {
     dimDisplay();
     inTuneSince = null;
   } else if (result.event === "switch-pending") {
     // Hold the last trustworthy value while a new, distant cluster is checked.
     inTuneSince = null;
+  }
+
+  // CANDIDATE counts as expired too: noisy input can bounce between IDLE and
+  // CANDIDATE indefinitely without ever acquiring, and the held reading must
+  // still clear. Anything acquired resets displayHoldUntil above.
+  if (
+    displayHoldUntil !== null &&
+    (result.state === PITCH_TRACKER_STATES.IDLE ||
+      result.state === PITCH_TRACKER_STATES.CANDIDATE) &&
+    now >= displayHoldUntil
+  ) {
+    displayHoldUntil = null;
+    autoString = -1;
+    resetDisplay();
   }
 
   updateDebugPanel({
@@ -870,6 +906,7 @@ function resetDetectionData() {
   clearPitchHistory({ clearStableValue: true });
   autoString = -1;
   inTuneSince = null;
+  displayHoldUntil = null;
   lastPitchCorrection = "—";
   lastMeasuredRms = Number.NaN;
 }

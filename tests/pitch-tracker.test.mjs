@@ -157,6 +157,58 @@ test("candidate gaps expire without publishing a pitch", () => {
   assert.equal(result.event, "candidate-lost");
 });
 
+test("unknown tracker options are rejected instead of silently ignored", () => {
+  // The options were renamed from frame counts to time-plus-sample pairs; a
+  // caller still passing the old names must not silently run on defaults.
+  assert.throws(
+    () => new PitchTracker({ acquireFrames: 3 }),
+    /unknown tracker option: acquireFrames/,
+  );
+  assert.throws(
+    () => new PitchTracker({ octaveSwitchFrames: 5 }),
+    /unknown tracker option: octaveSwitchFrames/,
+  );
+});
+
+test("far-pitch blips during release do not keep a dead note alive", () => {
+  const tracker = acquiredTracker(E2);
+
+  let result = frame(tracker, Number.NaN, 0, 50);
+  assert.equal(result.state, PITCH_TRACKER_STATES.RELEASE);
+
+  // Periodic tonal blips, each far from E2 and mutually unstable, arrive
+  // faster than releaseMs. They must not reset the release countdown.
+  result = frame(tracker, 440, 0.7, 150);
+  assert.equal(result.state, PITCH_TRACKER_STATES.RELEASE);
+  assert.equal(result.event, "switch-pending");
+  assertWithinCents(result.valueHz, E2, 1);
+
+  result = frame(tracker, 523.25, 0.7, 250);
+  assert.equal(result.state, PITCH_TRACKER_STATES.RELEASE);
+  assertWithinCents(result.valueHz, E2, 1);
+
+  result = frame(tracker, 587.33, 0.7, 280);
+  assertIdle(result);
+  assert.equal(result.event, "released");
+  assert.equal(tracker.value, null);
+});
+
+test("a stable new note arriving during release still switches quickly", () => {
+  const tracker = acquiredTracker(E2);
+  const A2 = 110;
+
+  frame(tracker, Number.NaN, 0, 50);
+  let result = frame(tracker, A2, 0.9, 100);
+  assert.equal(result.state, PITCH_TRACKER_STATES.RELEASE);
+  assert.equal(result.event, "switch-pending");
+
+  result = frame(tracker, A2, 0.9, 133);
+  assert.equal(result.event, "switched");
+  assert.equal(result.state, PITCH_TRACKER_STATES.TRACKING);
+  assert.equal(result.accepted, true);
+  assertWithinCents(result.valueHz, A2, 1);
+});
+
 test("reset clears all held pitch and state", () => {
   const tracker = acquiredTracker(E2);
   const reset = tracker.reset();

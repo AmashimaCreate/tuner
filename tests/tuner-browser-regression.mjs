@@ -123,11 +123,35 @@ try {
     await waitForPreset(fixture.page, { peg: 0, note: "E2", cents: 0, hz: e2 });
 
     await setInputGain(fixture.page, 0);
+
+    // Release must dim and hold the last reading, not blank it instantly: a
+    // fading string is still being read by the player.
     await fixture.page.waitForFunction(() => {
       const main = document.querySelector("#tunerMain");
-      return main?.dataset.trackerState === "idle" &&
+      return main?.dataset.trackerState === "idle" && main.dataset.signal === "dim";
+    }, null, { timeout: 4_000 });
+    const held = await fixture.page.evaluate(() => ({
+      atMs: performance.now(),
+      activePeg: document.querySelector(".peg.is-active")?.dataset.i ?? null,
+      note: `${document.querySelector("#gaugeNote")?.textContent ?? ""}${
+        document.querySelector("#gaugeOctave")?.textContent ?? ""
+      }`,
+    }));
+    assert.equal(held.activePeg, "0", "display hold must keep the E2 peg lit");
+    assert.equal(held.note, "E2", "display hold must keep the last note visible");
+
+    // ...and the held reading must clear on its own once displayHoldMs passes.
+    await fixture.page.waitForFunction(() => {
+      const main = document.querySelector("#tunerMain");
+      return main?.dataset.signal === "empty" &&
         document.querySelector(".peg.is-active") === null;
     }, null, { timeout: 4_000 });
+    const displayHoldMs =
+      (await fixture.page.evaluate(() => performance.now())) - held.atMs;
+    assert.ok(
+      displayHoldMs >= 1_000 && displayHoldMs <= 2_600,
+      `display hold cleared after ${Math.round(displayHoldMs)}ms, expected ~1500ms`,
+    );
 
     await setFrequency(fixture.page, a2);
     await resetUiTrace(fixture.page);
@@ -145,6 +169,7 @@ try {
     results.releaseReacquire = {
       activePeg: state.activePeg,
       trackerState: state.trackerState,
+      displayHoldMs: Math.round(displayHoldMs),
       trace: compactUiTrace(trace),
     };
     await fixture.context.close();
