@@ -2,7 +2,6 @@ import {
   centsBetween,
   GuitarPitchAnalyzer,
   nearestStringIndex,
-  PitchRefiner,
   PitchTracker,
   PITCH_TRACKER_STATES,
 } from "./pitch-processing.js";
@@ -96,11 +95,14 @@ const CONFIG = {
   humNotchQ: 35,
   fftSize: 2048,
   // Fine-measurement stage: once the tracker holds a note, the displayed
-  // cents come from harmonic-weighted spectral measurement over this longer
-  // window (171 ms at 48 kHz) — stable to fractions of a cent where the
-  // frame-by-frame tracker jitters by several.
-  refineFftSize: 8192,
-  refineMaxOffsetCents: 40,
+  // cents come from an NSDF pitch estimate over this long window (341 ms at
+  // 48 kHz). Measured on a real low-E phone recording, the long window drops
+  // the within-note reading jitter from several cents to well under one,
+  // where the short frame-by-frame estimate wandered badly. Using the SAME
+  // NSDF method as the coarse tracker also removes the coarse/fine
+  // disagreement that used to make the reading jump.
+  refineFftSize: 16384,
+  refineMaxOffsetCents: 60,
   concertAHz: 440,
   concertAMin: 415,
   concertAMax: 466,
@@ -308,7 +310,10 @@ const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
   maxHz: CONFIG.maxPitchHz,
 });
 
-const pitchRefiner = new PitchRefiner(CONFIG.refineFftSize);
+const fineAnalyzer = new GuitarPitchAnalyzer(CONFIG.refineFftSize, {
+  minHz: CONFIG.minPitchHz,
+  maxHz: CONFIG.maxPitchHz,
+});
 
 const pitchTracker = new PitchTracker({
   acquireClarityMin: CONFIG.clarityAcquireMin,
@@ -720,10 +725,10 @@ function analyseFrame(now) {
     let refinedHz = Number.NaN;
     if (referenceHz !== null && refineAnalyserNode && refineBuffer) {
       refineAnalyserNode.getFloatTimeDomainData(refineBuffer);
-      refinedHz = pitchRefiner.refine(
+      refinedHz = fineAnalyzer.analyze(
         refineBuffer,
         audioContext.sampleRate,
-        referenceHz,
+        { referenceHz },
       ).hz;
       if (Number.isFinite(refinedHz)) {
         lastRefinedHz = refinedHz;
