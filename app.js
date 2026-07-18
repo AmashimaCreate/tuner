@@ -49,18 +49,21 @@ const CONFIG = {
   attackSurgeMinRms: 0.002,
   attackRmsTauMs: 250,
   // Two-speed display smoothing: fast while the pitch is moving (a peg turn
-  // must feel immediate), slow once it has almost settled. A median-of-5
-  // prefilter absorbs single-frame spikes, and the needle only moves for
-  // changes above the deadband, so it settles instead of shimmering.
-  smoothingMoveTauMs: 65,
-  smoothingFineTauMs: 400,
-  smoothingFineRangeCents: 12,
-  smoothingFineDeltaCents: 12,
-  displayMedianWindow: 5,
-  // The bubble is driven by a critically-damped spring toward the measured
-  // target every frame: physical inertia makes all motion continuous and
-  // organic instead of hop-and-freeze.
-  bubbleSpringOmega: 9,
+  // must feel immediate), slow once it has almost settled. A One-Euro filter
+  // does exactly this: its cutoff rises with the SUSTAINED rate of change, so
+  // a held note is smoothed hard (steady) while a peg turn passes through
+  // almost instantly. A fixed long window cannot do both — it always lags.
+  // minCutoff sets the at-rest smoothing; derivativeCutoff smooths the speed
+  // estimate so frame-to-frame jitter (fast but not sustained) does not
+  // masquerade as motion; beta sets how much sustained motion opens it up.
+  oneEuroMinCutoffHz: 0.15,
+  oneEuroBeta: 0.7,
+  oneEuroDerivativeCutoffHz: 0.3,
+  // The bubble is driven by a critically-damped spring toward the smoothed
+  // target every frame: physical inertia keeps motion continuous and organic.
+  // Stiff enough (high omega) that the spring itself adds little lag on top of
+  // the filter — a soft spring was re-introducing the sluggishness.
+  bubbleSpringOmega: 24,
   bubbleSpringZeta: 0.95,
   // Bridge brief fine-measurement dropouts so the display does not fall back
   // to the jittery frame-by-frame value for a few frames.
@@ -101,7 +104,7 @@ const CONFIG = {
   // where the short frame-by-frame estimate wandered badly. Using the SAME
   // NSDF method as the coarse tracker also removes the coarse/fine
   // disagreement that used to make the reading jump.
-  refineFftSize: 16384,
+  refineFftSize: 8192,
   refineMaxOffsetCents: 60,
   concertAHz: 440,
   concertAMin: 415,
@@ -272,7 +275,9 @@ const stableHzHistory = [];
 let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
-const displayCentsBuffer = [];
+let filterPrevCents = null;
+let filterPrevSpeed = 0;
+let filterPrevAt = null;
 let displayedCentsInt = null;
 let bubbleTargetPosition = null;
 let bubblePosition = null;
@@ -865,7 +870,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
 function startAttackBlank(now) {
   attackBlankUntil = now + CONFIG.attackBlankMs;
   // The excursion samples must not seed the post-blank display.
-  displayCentsBuffer.length = 0;
+  resetCentsFilter();
   smoothedCents = null;
   lastDisplayAt = null;
   lastRefinedHz = Number.NaN;
@@ -921,24 +926,8 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     return;
   }
 
-  if (midi !== previousMidi) displayCentsBuffer.length = 0;
-  displayCentsBuffer.push(measurement.cents);
-  if (displayCentsBuffer.length > CONFIG.displayMedianWindow) displayCentsBuffer.shift();
-  const cents = medianOf(displayCentsBuffer);
-
-  if (midi !== previousMidi || smoothedCents === null || lastDisplayAt === null) {
-    smoothedCents = cents;
-  } else {
-    const deltaMs = Math.max(0, now - lastDisplayAt);
-    const useFineSmoothing =
-      Math.abs(cents) <= CONFIG.smoothingFineRangeCents &&
-      Math.abs(cents - smoothedCents) <= CONFIG.smoothingFineDeltaCents;
-    const tauMs = useFineSmoothing
-      ? CONFIG.smoothingFineTauMs
-      : CONFIG.smoothingMoveTauMs;
-    const alpha = 1 - Math.exp(-deltaMs / tauMs);
-    smoothedCents = alpha * cents + (1 - alpha) * smoothedCents;
-  }
+  if (midi !== previousMidi) resetCentsFilter();
+  smoothedCents = filterCents(measurement.cents, now);
   lastDisplayAt = now;
   previousMidi = midi;
 
@@ -1007,11 +996,42 @@ function setHiddenState(element, hidden) {
   else element.removeAttribute("hidden");
 }
 
-function medianOf(values) {
-  const sorted = [...values].sort(numberAscending);
-  const middle = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[middle];
-  return (sorted[middle - 1] + sorted[middle]) / 2;
+// One-Euro filter: a low-pass whose cutoff rises with the smoothed speed of
+// the signal. At rest the cutoff is oneEuroMinCutoffHz (heavy smoothing, so a
+// held note is steady); a sustained pitch change raises the cutoff and passes
+// through with little lag. The speed itself is low-passed at
+// oneEuroDerivativeCutoffHz so momentary measurement jitter — fast but not
+// sustained — does not open the filter and leak through.
+function filterCents(cents, nowMs) {
+  const nowSec = nowMs / 1000;
+  if (filterPrevCents === null || filterPrevAt === null) {
+    filterPrevCents = cents;
+    filterPrevSpeed = 0;
+    filterPrevAt = nowSec;
+    return cents;
+  }
+  const deltaSec = Math.max(1e-3, nowSec - filterPrevAt);
+  filterPrevAt = nowSec;
+
+  const rawSpeed = (cents - filterPrevCents) / deltaSec;
+  const speedAlpha = lowpassAlpha(CONFIG.oneEuroDerivativeCutoffHz, deltaSec);
+  filterPrevSpeed = speedAlpha * rawSpeed + (1 - speedAlpha) * filterPrevSpeed;
+
+  const cutoffHz = CONFIG.oneEuroMinCutoffHz + CONFIG.oneEuroBeta * Math.abs(filterPrevSpeed);
+  const alpha = lowpassAlpha(cutoffHz, deltaSec);
+  filterPrevCents = alpha * cents + (1 - alpha) * filterPrevCents;
+  return filterPrevCents;
+}
+
+function lowpassAlpha(cutoffHz, deltaSec) {
+  const tau = 1 / (2 * Math.PI * cutoffHz);
+  return 1 / (1 + tau / deltaSec);
+}
+
+function resetCentsFilter() {
+  filterPrevCents = null;
+  filterPrevSpeed = 0;
+  filterPrevAt = null;
 }
 
 function numberAscending(left, right) {
@@ -1193,7 +1213,7 @@ function syncTrackerState(result = { state: pitchTracker.state, event: pitchTrac
 function clearPitchHistory({ clearStableValue }) {
   rawHzHistory.length = 0;
   stableHzHistory.length = 0;
-  displayCentsBuffer.length = 0;
+  resetCentsFilter();
   displayedCentsInt = null;
   previousMidi = null;
   smoothedCents = null;
