@@ -229,6 +229,7 @@ const elements = {
   micButton: document.querySelector("#micButton"),
   errorMessage: document.querySelector("#errorMessage"),
   debugPanel: document.querySelector("#debugPanel"),
+  debugCapture: document.querySelector("#debugCapture"),
   debugRaw: document.querySelector("#debugRaw"),
   debugClarity: document.querySelector("#debugClarity"),
   debugRms: document.querySelector("#debugRms"),
@@ -338,6 +339,8 @@ elements.debugPanel.hidden = !DEBUG_ENABLED;
 setMeterRangeAttributes();
 updateDebugPanel();
 showInitialEnvironmentError();
+
+elements.debugCapture.addEventListener("click", startDiagnosticCapture);
 
 elements.micButton.addEventListener("click", () => {
   if (microphonePending) return;
@@ -829,6 +832,19 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     displayHoldUntil = null;
     autoString = -1;
     resetDisplay();
+  }
+
+  if (diagnosticCapture) {
+    diagnosticCapture.frames.push({
+      t: Math.round(now),
+      raw: Number.isFinite(rawHz) ? Number(rawHz.toFixed(2)) : null,
+      cl: Number.isFinite(clarity) ? Number(clarity.toFixed(3)) : null,
+      rms: Number.isFinite(rms) ? Number(rms.toFixed(5)) : null,
+      fine: Number.isFinite(refinedHz) ? Number(refinedHz.toFixed(3)) : null,
+      stable: Number.isFinite(result.valueHz) ? Number(result.valueHz.toFixed(2)) : null,
+      st: result.state,
+      ev: result.event,
+    });
   }
 
   updateDebugPanel({
@@ -1791,6 +1807,132 @@ async function resumeAudioContext(context) {
   if (context.state !== "running") {
     throw new Error(`AudioContext did not resume: ${context.state}`);
   }
+}
+
+// --- diagnostic capture: 10 s of raw microphone audio plus per-frame
+// pipeline values, downloaded as WAV + JSON so a real environment can be
+// replayed through the offline analysis harness exactly as heard. ---
+let diagnosticCapture = null;
+
+function startDiagnosticCapture() {
+  if (!DEBUG_ENABLED || diagnosticCapture || !microphoneActive || !audioContext || !sourceNode) {
+    return;
+  }
+  const context = audioContext;
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const silentSink = context.createGain();
+  silentSink.gain.value = 0;
+  const chunks = [];
+  processor.onaudioprocess = (event) => {
+    chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  sourceNode.connect(processor);
+  processor.connect(silentSink);
+  silentSink.connect(context.destination);
+  diagnosticCapture = {
+    context,
+    processor,
+    silentSink,
+    chunks,
+    frames: [],
+    startedAt: performance.now(),
+  };
+
+  const durationMs = 10_000;
+  const tick = () => {
+    if (!diagnosticCapture) return;
+    const elapsedMs = performance.now() - diagnosticCapture.startedAt;
+    if (elapsedMs >= durationMs) {
+      finishDiagnosticCapture();
+      return;
+    }
+    elements.debugCapture.textContent =
+      `計測中… 残り${Math.ceil((durationMs - elapsedMs) / 1000)}秒（普通に弾いてください）`;
+    window.setTimeout(tick, 250);
+  };
+  tick();
+}
+
+function finishDiagnosticCapture() {
+  const capture = diagnosticCapture;
+  diagnosticCapture = null;
+  if (!capture) return;
+  for (const disconnect of [
+    () => capture.processor.disconnect(),
+    () => capture.silentSink.disconnect(),
+    () => sourceNode?.disconnect(capture.processor),
+  ]) {
+    try { disconnect(); } catch { /* the graph may already be released */ }
+  }
+
+  const sampleRate = capture.context.sampleRate;
+  const totalSamples = capture.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const samples = new Float32Array(totalSamples);
+  let offset = 0;
+  for (const chunk of capture.chunks) {
+    samples.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const inputTrack = mediaStream?.getAudioTracks()[0];
+  downloadBlob(encodeWavPcm16(samples, sampleRate), `tuner-capture-${stamp}.wav`);
+  downloadBlob(
+    new Blob(
+      [JSON.stringify({
+        userAgent: navigator.userAgent,
+        sampleRate,
+        trackLabel: inputTrack?.label ?? null,
+        trackSettings: inputTrack?.getSettings?.() ?? null,
+        concertAHz,
+        tuningId: currentTuning.id,
+        capturedSeconds: totalSamples / sampleRate,
+        frames: capture.frames,
+      })],
+      { type: "application/json" },
+    ),
+    `tuner-capture-${stamp}.json`,
+  );
+  elements.debugCapture.textContent = "保存しました（ダウンロードフォルダ）— もう一度計測できます";
+}
+
+function encodeWavPcm16(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeAscii = (position, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(position + index, text.charCodeAt(index));
+    }
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  for (let index = 0; index < samples.length; index += 1) {
+    const clamped = Math.max(-1, Math.min(1, samples[index]));
+    view.setInt16(44 + index * 2, Math.round(clamped * 32767), true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 function updateDebugPanel(values = {}) {

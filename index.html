@@ -466,6 +466,17 @@
         opacity: 0.35;
       }
 
+      .debug-capture {
+        grid-column: 1 / -1;
+        min-height: 26px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-strong);
+        color: var(--muted);
+        font-size: 0.6rem;
+        font-weight: 700;
+      }
+
       .debug-panel {
         min-height: 70px;
         padding: 4px 6px;
@@ -970,6 +981,7 @@
           <span class="debug-item">midi<b id="debugMidi">—</b></span>
           <span class="debug-item">cents<b id="debugCents">—</b></span>
           <span class="debug-item">context<b id="debugContext">none</b></span>
+          <button id="debugCapture" class="debug-capture" type="button">計測10秒（音声+ログ保存）</button>
         </section>
       </main>
 
