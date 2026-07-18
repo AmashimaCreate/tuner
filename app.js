@@ -59,6 +59,17 @@ const CONFIG = {
   oneEuroMinCutoffHz: 0.15,
   oneEuroBeta: 0.7,
   oneEuroDerivativeCutoffHz: 0.3,
+  // Motion-state routing, the WebTuna "CanHearANote"/discarded architecture,
+  // measured against a real-fixture glide and the user's real capture:
+  //  - CHAOTIC  (spread wide, not monotonic — a hard attack): the sample is
+  //    discarded and the bubble keeps its position.
+  //  - GLIDING  (recent readings move together — a peg turn): follow the fast
+  //    2048 tracker; the 341 ms fine window lags a 40 c/s turn by ~15 cents.
+  //  - STATIONARY: use the long-window fine stage, stable to ~1 cent.
+  motionWindow: 10,
+  chaoticSpreadCents: 10,
+  glideMinCents: 4,
+  glideMonotonicRatio: 0.7,
   // The bubble is driven by a critically-damped spring toward the smoothed
   // target every frame: physical inertia keeps motion continuous and organic.
   // Stiff enough (high omega) that the spring itself adds little lag on top of
@@ -276,6 +287,7 @@ let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 let filterPrevCents = null;
+const motionBuffer = [];
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
 let displayedCentsInt = null;
@@ -878,20 +890,16 @@ function startAttackBlank(now) {
 }
 
 function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN, attackBlanked = false } = {}) {
-  // The fine measurement is trusted only while it agrees with the tracker;
-  // during fast changes the long window smears and the tracker leads.
-  const displayHz =
+  const fineValid =
     Number.isFinite(refinedHz) &&
-    Math.abs(centsBetween(refinedHz, stableHz)) <= CONFIG.refineMaxOffsetCents
-      ? refinedHz
-      : stableHz;
-  let measurement;
+    Math.abs(centsBetween(refinedHz, stableHz)) <= CONFIG.refineMaxOffsetCents;
+  let midi;
+  let targetHz;
 
   if (currentTuning.notes === null) {
-    // Note selection follows the tracker; the cents follow the fine stage.
-    const coarse = analyzePitch(stableHz);
-    const targetHz = concertAHz * 2 ** ((coarse.midi - CONFIG.midiA4) / 12);
-    measurement = { midi: coarse.midi, cents: centsBetween(displayHz, targetHz) };
+    // Note selection follows the tracker; the cents follow the chosen stage.
+    midi = analyzePitch(stableHz).midi;
+    targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   } else {
     if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
     if (manualString === null && reselectFramesLeft > 0) {
@@ -906,17 +914,41 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       return;
     }
 
-    measurement = {
-      midi: targetsMidi[stringIndex],
-      cents: centsBetween(displayHz, targetsHz[stringIndex]),
-    };
+    midi = targetsMidi[stringIndex];
+    targetHz = targetsHz[stringIndex];
   }
 
-  const { midi } = measurement;
+  const centsCoarse = centsBetween(stableHz, targetHz);
+  const centsFine = fineValid ? centsBetween(refinedHz, targetHz) : null;
 
-  // While the attack transient is blanked, keep identification current (note
-  // name, peg) but freeze the needle and drop the biased measurements.
-  if (attackBlanked) {
+  if (midi !== previousMidi) resetCentsFilter();
+
+  // Motion classification over the fast tracker's recent readings.
+  motionBuffer.push(centsCoarse);
+  if (motionBuffer.length > CONFIG.motionWindow) motionBuffer.shift();
+  const spread = Math.max(...motionBuffer) - Math.min(...motionBuffer);
+  const travel = Math.abs(motionBuffer[motionBuffer.length - 1] - motionBuffer[0]);
+  const windowFull = motionBuffer.length === CONFIG.motionWindow;
+  const chaotic =
+    !windowFull ||
+    (spread > CONFIG.chaoticSpreadCents &&
+      travel < CONFIG.glideMonotonicRatio * spread);
+  const gliding =
+    !chaotic &&
+    travel >= CONFIG.glideMinCents &&
+    travel >= CONFIG.glideMonotonicRatio * spread;
+
+  const measurement = {
+    midi,
+    cents: gliding || centsFine === null ? centsCoarse : centsFine,
+  };
+
+  // While the attack transient is blanked — or the readings are chaotic (a
+  // hard attack scatters them tens of cents apart) — keep identification
+  // current (note name, peg) but freeze the reading and discard the sample.
+  // The bubble not moving at all through a hard attack is exactly the
+  // commercial-tuner behaviour.
+  if (attackBlanked || chaotic) {
     const blankNoteIndex = ((midi % NOTE_NAMES.length) + NOTE_NAMES.length) % NOTE_NAMES.length;
     elements.gaugeNote.textContent = NOTE_NAMES[blankNoteIndex];
     elements.gaugeOctave.textContent = String(Math.floor(midi / NOTE_NAMES.length) - 1);
@@ -926,7 +958,6 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     return;
   }
 
-  if (midi !== previousMidi) resetCentsFilter();
   smoothedCents = filterCents(measurement.cents, now);
   lastDisplayAt = now;
   previousMidi = midi;
@@ -1032,6 +1063,7 @@ function resetCentsFilter() {
   filterPrevCents = null;
   filterPrevSpeed = 0;
   filterPrevAt = null;
+  motionBuffer.length = 0;
 }
 
 function numberAscending(left, right) {
