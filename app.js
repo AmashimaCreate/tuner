@@ -70,12 +70,10 @@ const CONFIG = {
   chaoticSpreadCents: 10,
   glideMinCents: 4,
   glideMonotonicRatio: 0.7,
-  // The bubble is driven by a critically-damped spring toward the smoothed
-  // target every frame: physical inertia keeps motion continuous and organic.
-  // Stiff enough (high omega) that the spring itself adds little lag on top of
-  // the filter — a soft spring was re-introducing the sluggishness.
-  bubbleSpringOmega: 24,
-  bubbleSpringZeta: 0.95,
+  // The bubble eases toward its target with a per-frame speed ceiling, so it
+  // always travels smoothly and can never lurch across the lane in one frame.
+  bubbleEaseTauSec: 0.11,
+  bubbleMaxSpeedPerSec: 1.4,
   // Bridge brief fine-measurement dropouts so the display does not fall back
   // to the jittery frame-by-frame value for a few frames.
   refinedHoldMs: 250,
@@ -293,7 +291,6 @@ let filterPrevAt = null;
 let displayedCentsInt = null;
 let bubbleTargetPosition = null;
 let bubblePosition = null;
-let bubbleVelocity = 0;
 let bubbleAnimatedAt = null;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
@@ -881,10 +878,12 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
 
 function startAttackBlank(now) {
   attackBlankUntil = now + CONFIG.attackBlankMs;
-  // The excursion samples must not seed the post-blank display.
-  resetCentsFilter();
-  smoothedCents = null;
-  lastDisplayAt = null;
+  // Freeze the reading through the attack but KEEP the smoothing state: the
+  // held value and its filter must survive so the bubble eases on from where
+  // it was, instead of resetting and lurching to the first post-attack sample.
+  // Only the motion-classifier and fine-hold history, which the excursion
+  // would poison, are cleared.
+  motionBuffer.length = 0;
   lastRefinedHz = Number.NaN;
   lastRefinedAt = -Infinity;
 }
@@ -1205,7 +1204,6 @@ function resetDisplay() {
   elements.gaugeCents.textContent = "—";
   bubbleTargetPosition = null;
   bubblePosition = null;
-  bubbleVelocity = 0;
   elements.gaugeBubble.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "音程未検出");
@@ -1326,7 +1324,6 @@ function animateBubble(now) {
   if (bubbleTargetPosition === null) {
     if (bubblePosition !== null) {
       bubblePosition = null;
-      bubbleVelocity = 0;
       elements.gaugeBubble.setAttribute("hidden", "");
     }
     bubbleAnimatedAt = now;
@@ -1339,16 +1336,17 @@ function animateBubble(now) {
   bubbleAnimatedAt = now;
   if (bubblePosition === null) {
     bubblePosition = bubbleTargetPosition;
-    bubbleVelocity = 0;
   } else {
-    // Critically-damped spring: physical inertia is what makes the motion
-    // read as organic instead of stepped.
-    const omega = CONFIG.bubbleSpringOmega;
-    const acceleration =
-      omega * omega * (bubbleTargetPosition - bubblePosition) -
-      2 * CONFIG.bubbleSpringZeta * omega * bubbleVelocity;
-    bubbleVelocity += acceleration * deltaSeconds;
-    bubblePosition += bubbleVelocity * deltaSeconds;
+    // Ease toward the target, then hard-clamp the per-frame move to a maximum
+    // speed. The clamp is the guarantee the bubble can never lurch across the
+    // lane in one frame — a stiff spring let it jump a third of the lane at
+    // once, which read as the whole meter "snapping". A bounded speed makes it
+    // travel there smoothly instead, matching a commercial tuner's needle.
+    const eased =
+      (bubbleTargetPosition - bubblePosition) *
+      Math.min(1, deltaSeconds / CONFIG.bubbleEaseTauSec);
+    const maxStep = CONFIG.bubbleMaxSpeedPerSec * deltaSeconds;
+    bubblePosition += clamp(eased, -maxStep, maxStep);
   }
   const x = (GAUGE.centerX + bubblePosition * GAUGE.halfSpanX).toFixed(1);
   elements.gaugeBubble.setAttribute("transform", `translate(${x} ${GAUGE.laneY})`);
@@ -1369,7 +1367,6 @@ function renderNoTargetDisplay() {
   displayedCentsInt = null;
   bubbleTargetPosition = null;
   bubblePosition = null;
-  bubbleVelocity = 0;
   elements.gaugeBubble.setAttribute("hidden", "");
   hideTuneHints();
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
