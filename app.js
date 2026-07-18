@@ -40,14 +40,6 @@ const CONFIG = {
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
   displayHoldMs: 1500,
-  // A pluck physically starts 10-16 cents sharp and glides down as the
-  // transient decays. The needle freezes for this long after an attack and
-  // the measurements are discarded, so the excursion is never drawn; the
-  // residual offset once the blank ends measures under 4 cents.
-  attackBlankMs: 180,
-  attackSurgeRatio: 3,
-  attackSurgeMinRms: 0.002,
-  attackRmsTauMs: 250,
   // Two-speed display smoothing: fast while the pitch is moving (a peg turn
   // must feel immediate), slow once it has almost settled. A One-Euro filter
   // does exactly this: its cutoff rises with the SUSTAINED rate of change, so
@@ -59,17 +51,6 @@ const CONFIG = {
   oneEuroMinCutoffHz: 0.15,
   oneEuroBeta: 0.7,
   oneEuroDerivativeCutoffHz: 0.3,
-  // Motion-state routing, the WebTuna "CanHearANote"/discarded architecture,
-  // measured against a real-fixture glide and the user's real capture:
-  //  - CHAOTIC  (spread wide, not monotonic — a hard attack): the sample is
-  //    discarded and the bubble keeps its position.
-  //  - GLIDING  (recent readings move together — a peg turn): follow the fast
-  //    2048 tracker; the 341 ms fine window lags a 40 c/s turn by ~15 cents.
-  //  - STATIONARY: use the long-window fine stage, stable to ~1 cent.
-  motionWindow: 10,
-  chaoticSpreadCents: 10,
-  glideMinCents: 4,
-  glideMonotonicRatio: 0.7,
   // The bubble eases toward its target with a per-frame speed ceiling, so it
   // always travels smoothly and can never lurch across the lane in one frame.
   bubbleEaseTauSec: 0.11,
@@ -285,7 +266,6 @@ let previousMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 let filterPrevCents = null;
-const motionBuffer = [];
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
 let displayedCentsInt = null;
@@ -295,9 +275,6 @@ let bubbleAnimatedAt = null;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
-let attackBlankUntil = -Infinity;
-let slowRms = null;
-let slowRmsUpdatedAt = null;
 let lastStableHz = null;
 let lastMeasuredRms = Number.NaN;
 let lastPitchCorrection = "—";
@@ -780,22 +757,6 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
 
   if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
 
-  // Re-plucking a still-ringing string never leaves TRACKING, so the attack
-  // is caught by the sudden energy jump rather than a tracker event.
-  if (Number.isFinite(rms)) {
-    if (
-      slowRms !== null &&
-      rms >= CONFIG.attackSurgeMinRms &&
-      rms >= CONFIG.attackSurgeRatio * slowRms
-    ) {
-      startAttackBlank(now);
-    }
-    const deltaMs = slowRmsUpdatedAt === null ? 0 : Math.max(0, now - slowRmsUpdatedAt);
-    const alpha = 1 - Math.exp(-deltaMs / CONFIG.attackRmsTauMs);
-    slowRms = slowRms === null ? rms : alpha * rms + (1 - alpha) * slowRms;
-    slowRmsUpdatedAt = now;
-  }
-
   const result = pitchTracker.update({
     hz: signalUsable ? rawHz : Number.NaN,
     clarity: signalUsable ? clarity : Number.NaN,
@@ -806,7 +767,6 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   if (result.accepted && Number.isFinite(result.valueHz)) {
     const stableHz = result.valueHz;
     const reselectString = result.event === "acquired" || result.event === "switched";
-    if (reselectString) startAttackBlank(now);
     // A fresh acquisition after silence is a new note: the sticky bias that
     // protects a bent note mid-tracking must not carry over from before the
     // release, or a detuned string could keep the previous peg lit.
@@ -817,11 +777,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     lastPitchCorrection = folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
-    updateDisplay(stableHz, now, {
-      reselectString,
-      refinedHz,
-      attackBlanked: now <= attackBlankUntil,
-    });
+    updateDisplay(stableHz, now, { reselectString, refinedHz });
   } else if (result.event === "released") {
     // Keep the last reading visible but dimmed for a short while: a plucked
     // string fading out should not blank the tuner the player is reading.
@@ -876,19 +832,15 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   });
 }
 
-function startAttackBlank(now) {
-  attackBlankUntil = now + CONFIG.attackBlankMs;
-  // Freeze the reading through the attack but KEEP the smoothing state: the
-  // held value and its filter must survive so the bubble eases on from where
-  // it was, instead of resetting and lurching to the first post-attack sample.
-  // Only the motion-classifier and fine-hold history, which the excursion
-  // would poison, are cleared.
-  motionBuffer.length = 0;
-  lastRefinedHz = Number.NaN;
-  lastRefinedAt = -Infinity;
-}
-
-function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN, attackBlanked = false } = {}) {
+// The display path is deliberately a single straight line: pick the note the
+// tracker is on, measure its cents ONCE (fine value when it agrees with the
+// tracker, else the tracker's own), run it through ONE adaptive filter, and
+// draw it with a hard speed ceiling. No coarse/fine switching, no motion
+// classifier, no per-frame discard — those interacting layers were the source
+// of the sudden jumps. The filter is reset only on a real note change; a hard
+// attack is handled by the filter's own inertia plus the speed clamp, not by
+// blanking.
+function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Number.NaN } = {}) {
   const fineValid =
     Number.isFinite(refinedHz) &&
     Math.abs(centsBetween(refinedHz, stableHz)) <= CONFIG.refineMaxOffsetCents;
@@ -896,7 +848,6 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   let targetHz;
 
   if (currentTuning.notes === null) {
-    // Note selection follows the tracker; the cents follow the chosen stage.
     midi = analyzePitch(stableHz).midi;
     targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   } else {
@@ -917,47 +868,14 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     targetHz = targetsHz[stringIndex];
   }
 
-  const centsCoarse = centsBetween(stableHz, targetHz);
-  const centsFine = fineValid ? centsBetween(refinedHz, targetHz) : null;
+  // The fine (long-window) value is preferred whenever it agrees with the
+  // tracker; it is steadier at rest. During a fast peg turn the long window
+  // lags and disagrees, so the check naturally falls back to the tracker.
+  const measuredHz = fineValid ? refinedHz : stableHz;
+  const measuredCents = centsBetween(measuredHz, targetHz);
 
   if (midi !== previousMidi) resetCentsFilter();
-
-  // Motion classification over the fast tracker's recent readings.
-  motionBuffer.push(centsCoarse);
-  if (motionBuffer.length > CONFIG.motionWindow) motionBuffer.shift();
-  const spread = Math.max(...motionBuffer) - Math.min(...motionBuffer);
-  const travel = Math.abs(motionBuffer[motionBuffer.length - 1] - motionBuffer[0]);
-  const windowFull = motionBuffer.length === CONFIG.motionWindow;
-  const chaotic =
-    !windowFull ||
-    (spread > CONFIG.chaoticSpreadCents &&
-      travel < CONFIG.glideMonotonicRatio * spread);
-  const gliding =
-    !chaotic &&
-    travel >= CONFIG.glideMinCents &&
-    travel >= CONFIG.glideMonotonicRatio * spread;
-
-  const measurement = {
-    midi,
-    cents: gliding || centsFine === null ? centsCoarse : centsFine,
-  };
-
-  // While the attack transient is blanked — or the readings are chaotic (a
-  // hard attack scatters them tens of cents apart) — keep identification
-  // current (note name, peg) but freeze the reading and discard the sample.
-  // The bubble not moving at all through a hard attack is exactly the
-  // commercial-tuner behaviour.
-  if (attackBlanked || chaotic) {
-    const blankNoteIndex = ((midi % NOTE_NAMES.length) + NOTE_NAMES.length) % NOTE_NAMES.length;
-    elements.gaugeNote.textContent = NOTE_NAMES[blankNoteIndex];
-    elements.gaugeOctave.textContent = String(Math.floor(midi / NOTE_NAMES.length) - 1);
-    elements.tunerMain.dataset.signal = "active";
-    previousMidi = midi;
-    updateDebugPanel({ stableHz, midi, cents: smoothedCents });
-    return;
-  }
-
-  smoothedCents = filterCents(measurement.cents, now);
+  smoothedCents = filterCents(measuredCents, now);
   lastDisplayAt = now;
   previousMidi = midi;
 
@@ -1062,7 +980,6 @@ function resetCentsFilter() {
   filterPrevCents = null;
   filterPrevSpeed = 0;
   filterPrevAt = null;
-  motionBuffer.length = 0;
 }
 
 function numberAscending(left, right) {
@@ -1223,9 +1140,6 @@ function resetDetectionData() {
   inTuneSince = null;
   displayHoldUntil = null;
   reselectFramesLeft = 0;
-  attackBlankUntil = -Infinity;
-  slowRms = null;
-  slowRmsUpdatedAt = null;
   lastRefinedHz = Number.NaN;
   lastRefinedAt = -Infinity;
   lastPitchCorrection = "—";
