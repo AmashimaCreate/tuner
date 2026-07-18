@@ -94,6 +94,10 @@ const CONFIG = {
   // where the short frame-by-frame estimate wandered badly. Using the SAME
   // NSDF method as the coarse tracker also removes the coarse/fine
   // disagreement that used to make the reading jump.
+  // Chromatic note-name hysteresis: a note is held until the pitch moves this
+  // far past the semitone boundary, so a pitch sitting on the boundary does
+  // not flicker between two note names.
+  chromaticHysteresisCents: 15,
   refineFftSize: 8192,
   refineMaxOffsetCents: 60,
   concertAHz: 440,
@@ -263,6 +267,7 @@ let trackEndedHandler = null;
 const rawHzHistory = [];
 const stableHzHistory = [];
 let previousMidi = null;
+let chromaticHeldMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
 let filterPrevCents = null;
@@ -848,7 +853,20 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   let targetHz;
 
   if (currentTuning.notes === null) {
-    midi = analyzePitch(stableHz).midi;
+    // Chromatic note selection with hysteresis: a string tuned exactly between
+    // two semitones (e.g. 80 Hz, halfway between D#2 and E2) would otherwise
+    // flip its note name every frame, teleporting the reading a whole
+    // semitone. Keep the note the display is already on until the pitch moves
+    // clearly past the boundary into the neighbour.
+    const nearestMidi = analyzePitch(stableHz).midi;
+    if (
+      chromaticHeldMidi === null ||
+      Math.abs(centsBetween(stableHz, concertAHz * 2 ** ((chromaticHeldMidi - CONFIG.midiA4) / 12))) >
+        50 + CONFIG.chromaticHysteresisCents
+    ) {
+      chromaticHeldMidi = nearestMidi;
+    }
+    midi = chromaticHeldMidi;
     targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   } else {
     if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
@@ -1160,6 +1178,7 @@ function clearPitchHistory({ clearStableValue }) {
   resetCentsFilter();
   displayedCentsInt = null;
   previousMidi = null;
+  chromaticHeldMidi = null;
   smoothedCents = null;
   lastDisplayAt = null;
   displayTuned = false;
