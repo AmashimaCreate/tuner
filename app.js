@@ -40,16 +40,17 @@ const CONFIG = {
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
   displayHoldMs: 1500,
-  // Two-speed display smoothing: fast while the pitch is moving (a peg turn
-  // must feel immediate), slow once it has almost settled. A One-Euro filter
-  // does exactly this: its cutoff rises with the SUSTAINED rate of change, so
-  // a held note is smoothed hard (steady) while a peg turn passes through
-  // almost instantly. A fixed long window cannot do both — it always lags.
-  // minCutoff sets the at-rest smoothing; derivativeCutoff smooths the speed
-  // estimate so frame-to-frame jitter (fast but not sustained) does not
-  // masquerade as motion; beta sets how much sustained motion opens it up.
-  oneEuroMinCutoffHz: 0.15,
-  oneEuroBeta: 0.7,
+  // Display smoothing. A plucked string physically starts up to ~15 cents
+  // sharp and glides down to its true pitch over a second or more — measured
+  // on the player's own low E. That glide is a real, sustained pitch movement,
+  // indistinguishable in rate from a peg turn, so a motion-adaptive (One-Euro
+  // beta > 0) filter chases it and the reading visibly climbs then falls on
+  // every pluck. beta is therefore 0: a plain low-pass that smooths the glide
+  // away, showing a steady value that eases gently to the settled pitch. The
+  // cost is that a fast peg turn lags by a few hundred ms, which is
+  // acceptable while tuning; the previous jump/jitter was not.
+  oneEuroMinCutoffHz: 0.1,
+  oneEuroBeta: 0,
   oneEuroDerivativeCutoffHz: 0.3,
   // The bubble eases toward its target with a per-frame speed ceiling, so it
   // always travels smoothly and can never lurch across the lane in one frame.
