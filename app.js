@@ -112,6 +112,17 @@ const CONFIG = {
   chimeBlankingMs: 500,
   midiA4: 69,
   stringMatchMaxCents: 600,
+  // Octave correction. At a hard attack the detector can lock an octave below
+  // the played note (a subharmonic key maximum transiently wins), so a plucked
+  // B3 briefly reads as ~124 Hz and the display jumps a whole octave. A real
+  // fundamental has strong odd harmonics (f, 3f, 5f); a subharmonic artifact
+  // has almost none — its energy sits on the even multiples (2f, 4f) that
+  // belong to the true note an octave up. When the odd/even harmonic-energy
+  // ratio is below octaveHarmonicRatioMax AND twice the reading lands on a
+  // target string, the octave is corrected up. Both conditions are required so
+  // a real low note (whose double is not a string) is never pushed up.
+  octaveHarmonicRatioMax: 0.4,
+  octaveTargetSnapCents: 60,
   // Hysteresis for auto string selection: another target must be this much
   // closer before the peg moves. It only needs to beat measurement jitter
   // (±10 cents); adjacent strings are 400+ cents apart, and the measured
@@ -311,6 +322,16 @@ const fineAnalyzer = new GuitarPitchAnalyzer(CONFIG.refineFftSize, {
   minHz: CONFIG.minPitchHz,
   maxHz: CONFIG.maxPitchHz,
 });
+
+// Hann window over the long buffer, precomputed once for the octave corrector's
+// harmonic-energy probes.
+const octaveWindow = (() => {
+  const window = new Float32Array(CONFIG.refineFftSize);
+  for (let index = 0; index < window.length; index += 1) {
+    window[index] = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / (window.length - 1));
+  }
+  return window;
+})();
 
 const pitchTracker = new PitchTracker({
   acquireClarityMin: CONFIG.clarityAcquireMin,
@@ -705,6 +726,11 @@ function analyseFrame(now) {
     const rms = calculateRms(waveformBuffer);
     lastMeasuredRms = rms;
 
+    // Keep the long buffer current every frame, tracking or not: the octave
+    // corrector needs it at the acquiring frame, before a tracked pitch exists.
+    const refineBufferReady = Boolean(refineAnalyserNode && refineBuffer);
+    if (refineBufferReady) refineAnalyserNode.getFloatTimeDomainData(refineBuffer);
+
     // While a note is tracked, tell the analyzer so decaying input holds the
     // tracked pitch instead of sliding onto a stronger subharmonic maximum.
     const referenceHz =
@@ -720,8 +746,7 @@ function analyseFrame(now) {
 
     // Fine measurement over the long window, anchored on the tracked pitch.
     let refinedHz = Number.NaN;
-    if (referenceHz !== null && refineAnalyserNode && refineBuffer) {
-      refineAnalyserNode.getFloatTimeDomainData(refineBuffer);
+    if (referenceHz !== null && refineBufferReady) {
       refinedHz = fineAnalyzer.analyze(
         refineBuffer,
         audioContext.sampleRate,
@@ -771,7 +796,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   syncTrackerState(result);
 
   if (result.accepted && Number.isFinite(result.valueHz)) {
-    const stableHz = result.valueHz;
+    const stableHz = octaveCorrectHz(result.valueHz);
     const reselectString = result.event === "acquired" || result.event === "switched";
     // A fresh acquisition after silence is a new note: the sticky bias that
     // protects a bent note mid-tracking must not carry over from before the
@@ -1678,6 +1703,54 @@ function analyzePitch(hz) {
   const targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   const cents = 1200 * Math.log2(hz / targetHz);
   return { midi, cents };
+}
+
+// Windowed single-frequency magnitude via the Goertzel recurrence (no
+// per-sample trig) over the long buffer.
+function harmonicMagnitude(hz) {
+  const sampleRate = audioContext?.sampleRate;
+  if (!Number.isFinite(sampleRate) || !refineBuffer) return 0;
+  const coefficient = 2 * Math.cos((2 * Math.PI * hz) / sampleRate);
+  let s1 = 0;
+  let s2 = 0;
+  for (let index = 0; index < refineBuffer.length; index += 1) {
+    const s0 = refineBuffer[index] * octaveWindow[index] + coefficient * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+  return Math.sqrt(s1 * s1 + s2 * s2 - coefficient * s1 * s2);
+}
+
+// Correct an octave-down lock (a plucked note read as its subharmonic) up to
+// the true fundamental, using the long buffer's harmonic structure. Only fires
+// when the odd harmonics are weak AND twice the reading lands on a target
+// string, so a genuine low note is never pushed up. See octaveHarmonicRatioMax.
+function octaveCorrectHz(hz) {
+  if (
+    !Number.isFinite(hz) ||
+    hz <= 0 ||
+    targetsHz.length === 0 ||
+    !refineBuffer ||
+    2 * hz > CONFIG.maxPitchHz
+  ) {
+    return hz;
+  }
+
+  let nearestDoubleCents = Infinity;
+  for (const target of targetsHz) {
+    nearestDoubleCents = Math.min(
+      nearestDoubleCents,
+      Math.abs(centsBetween(2 * hz, target)),
+    );
+  }
+  if (nearestDoubleCents > CONFIG.octaveTargetSnapCents) return hz;
+
+  const oddEnergy =
+    harmonicMagnitude(hz) + harmonicMagnitude(3 * hz) + harmonicMagnitude(5 * hz);
+  const evenEnergy =
+    harmonicMagnitude(2 * hz) + harmonicMagnitude(4 * hz) + harmonicMagnitude(6 * hz);
+
+  return oddEnergy < CONFIG.octaveHarmonicRatioMax * evenEnergy ? 2 * hz : hz;
 }
 
 function calculateRms(buffer) {

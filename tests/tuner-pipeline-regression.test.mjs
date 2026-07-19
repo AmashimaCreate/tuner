@@ -44,6 +44,8 @@ const APP_CONFIG = {
   fftSize: 2048,
   refineFftSize: 8192,
   refineMaxOffsetCents: 60,
+  octaveHarmonicRatioMax: 0.4,
+  octaveTargetSnapCents: 60,
 };
 
 // The analysis chain the app builds in front of the analyser node.
