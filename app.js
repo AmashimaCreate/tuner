@@ -73,11 +73,10 @@ const CONFIG = {
   // A fresh or badly slipped string sits 100-200 cents off; the needle must
   // keep moving through that whole approach or winding feels like nothing is
   // happening.
-  meterRangeCents: 200,
-  // The inner +-10 cents get half the dial, mapped linearly: linear mapping
-  // keeps jitter magnification constant (a square-root scale has unbounded
-  // gain at zero and makes even a +-1 cent wobble look violent).
-  meterLinearCents: 10,
+  meterRangeCents: 100,
+  // Exponent > 1 compresses the centre of the lane (see lanePosition): the
+  // in-tune region reads as a stable well instead of amplifying jitter.
+  meterCompressExponent: 1.2,
   // 62 keeps 60 Hz mains hum outside the pitch range while every listed
   // tuning's lowest string (C2 = 65.4 Hz) stays detectable down to -80 cents.
   minPitchHz: 62,
@@ -193,8 +192,9 @@ const GAUGE = {
   // in-tune band (±5¢) occupies a quarter of each half-lane.
   ticks: [
     { cents: 10, rank: "medium" },
+    { cents: 25, rank: "minor" },
     { cents: 50, rank: "medium" },
-    { cents: 200, rank: "major" },
+    { cents: 100, rank: "major" },
   ],
 };
 const GET_USER_MEDIA_CONSTRAINTS = {
@@ -1263,18 +1263,16 @@ function initializeGauge() {
   elements.gaugeTicks.replaceChildren(fragment);
 }
 
-// Piecewise-linear mapping to [-1, 1]: the inner ±meterLinearCents take half
-// the lane, the rest is compressed into the outer half. Fine tuning stays
-// readable and, unlike a square-root scale, the gain near zero is finite, so
-// measurement wobble is not visually magnified where precision matters.
+// Power mapping to [-1, 1] with exponent > 1: the bubble is LESS sensitive
+// near the centre and more sensitive toward the edges. The previous scale did
+// the opposite — it expanded the inner cents so the centre was ~19x more
+// sensitive than the edge, which magnified a few cents of real measurement
+// jitter into ~20 px of bubble chatter exactly when fine-tuning. Compressing
+// the centre instead makes the in-tune region a stable well (the same jitter
+// is ~3 px) while +-10..20 cents stay clearly readable to guide the tuning.
 function lanePosition(cents) {
-  const absCents = Math.min(Math.abs(cents), CONFIG.meterRangeCents);
-  const linear = CONFIG.meterLinearCents;
-  return Math.sign(cents) * (
-    absCents <= linear
-      ? (absCents / linear) * 0.5
-      : 0.5 + ((absCents - linear) / (CONFIG.meterRangeCents - linear)) * 0.5
-  );
+  const normalized = Math.min(Math.abs(cents), CONFIG.meterRangeCents) / CONFIG.meterRangeCents;
+  return Math.sign(cents) * normalized ** CONFIG.meterCompressExponent;
 }
 
 function laneX(cents) {
