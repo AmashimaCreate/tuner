@@ -186,20 +186,17 @@ const HEADSTOCK_TYPES = {
 };
 const GAUGE = {
   centerX: 140,
-  halfSpanX: 116,
-  // Bars grow upward from this baseline; the shortest (inactive) bars are
-  // barMinHeight, the tallest barMaxHeight.
-  baselineY: 108,
-  barCount: 25,
-  barWidth: 5,
-  barMinHeight: 9,
-  barMaxHeight: 46,
+  laneY: 104,
+  halfSpanX: 118,
+  // Ticks at these cents; positions follow the piecewise scale, so the
+  // in-tune band (±5¢) occupies a quarter of each half-lane.
+  ticks: [
+    { cents: 10, rank: "medium" },
+    { cents: 25, rank: "minor" },
+    { cents: 50, rank: "medium" },
+    { cents: 100, rank: "major" },
+  ],
 };
-// Half the bars sit on each side of centre; index barCenter is the middle bar.
-const BAR_CENTER = (GAUGE.barCount - 1) / 2;
-// The live <rect> bars, populated by initializeGauge(). Declared here so the
-// top-level initializeGauge() call is not in this const's temporal dead zone.
-const gaugeBars = [];
 const GET_USER_MEDIA_CONSTRAINTS = {
   audio: {
     echoCancellation: false,
@@ -229,7 +226,12 @@ const elements = {
   hzUp: document.querySelector("#hz-up"),
   headstock: document.querySelector("#headstock"),
   headstockImage: document.querySelector("#headstock-image"),
-  gaugeBars: document.querySelector("#gaugeBars"),
+  gaugeTicks: document.querySelector("#gaugeTicks"),
+  gaugeLane: document.querySelector("#gaugeLane"),
+  gaugeZoneFine: document.querySelector("#gaugeZoneFine"),
+  gaugeNotch: document.querySelector("#gaugeNotch"),
+  gaugeBubble: document.querySelector("#gaugeBubble"),
+  gaugeBubbleCircle: document.querySelector("#gaugeBubbleCircle"),
   gaugeNote: document.querySelector("#gaugeNote"),
   gaugeOctave: document.querySelector("#gaugeOctave"),
   gaugeCents: document.querySelector("#gaugeCents"),
@@ -955,7 +957,9 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
 
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
-  elements.gaugeCents.textContent = formatBubbleCents(displayedCentsInt);
+  elements.gaugeCents.textContent = displayTuned
+    ? "\u2713"
+    : formatBubbleCents(displayedCentsInt);
   renderGaugeValue(gaugeCents);
   elements.pitchMeter.setAttribute("aria-valuenow", gaugeCents.toFixed(1));
   elements.pitchMeter.setAttribute(
@@ -965,13 +969,15 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   elements.tunerMain.dataset.signal = "active";
   elements.tunerMain.dataset.tuned = String(displayTuned);
 
-  // Wordless guidance: ◀ = raise (flat), ▶ = lower (sharp), ✓ = in tune. The
-  // bars and colors carry the magnitude; the symbol answers "what do I do".
+  // Wordless guidance: ∧ = raise, ∨ = lower, ✓ = in tune. The dial, colors
+  // and needle carry the state; the symbol answers "what do I do".
   const direction = displayTuned ? "tuned" : smoothedCents < 0 ? "flat" : "sharp";
   elements.tunerMain.dataset.direction = direction;
   setHiddenState(elements.gaugeHintUp, direction !== "flat");
   setHiddenState(elements.gaugeHintDown, direction !== "sharp");
-  setHiddenState(elements.gaugeHintCheck, !displayTuned);
+  // The bubble itself turns into the green check; a second check on top
+  // would be redundant.
+  setHiddenState(elements.gaugeHintCheck, true);
   const statusText = displayTuned ? "ぴったり" : direction === "flat" ? "低い（上げる）" : "高い（下げる）";
   if (elements.tuneStatus.textContent !== statusText) {
     elements.tuneStatus.textContent = statusText;
@@ -1162,7 +1168,7 @@ function resetDisplay() {
   elements.gaugeCents.textContent = "—";
   bubbleTargetPosition = null;
   bubblePosition = null;
-  renderBars(0, false, false);
+  elements.gaugeBubble.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "音程未検出");
   elements.tunerMain.dataset.signal = "empty";
@@ -1209,72 +1215,52 @@ function clearPitchHistory({ clearStableValue }) {
 }
 
 function initializeGauge() {
+  const laneLeft = GAUGE.centerX - GAUGE.halfSpanX;
+  const laneRight = GAUGE.centerX + GAUGE.halfSpanX;
+  elements.gaugeLane.setAttribute("x1", String(laneLeft));
+  elements.gaugeLane.setAttribute("x2", String(laneRight));
+  elements.gaugeLane.setAttribute("y1", String(GAUGE.laneY));
+  elements.gaugeLane.setAttribute("y2", String(GAUGE.laneY));
+
+  // The green zone shows the goal before the bubble reaches it.
+  elements.gaugeZoneFine.setAttribute("x1", laneX(-CONFIG.inTuneCents).toFixed(1));
+  elements.gaugeZoneFine.setAttribute("x2", laneX(CONFIG.inTuneCents).toFixed(1));
+  elements.gaugeZoneFine.setAttribute("y1", String(GAUGE.laneY));
+  elements.gaugeZoneFine.setAttribute("y2", String(GAUGE.laneY));
+
+  elements.gaugeNotch.setAttribute("x1", String(GAUGE.centerX));
+  elements.gaugeNotch.setAttribute("x2", String(GAUGE.centerX));
+  elements.gaugeNotch.setAttribute("y1", String(GAUGE.laneY - 14));
+  elements.gaugeNotch.setAttribute("y2", String(GAUGE.laneY + 14));
+
   const fragment = document.createDocumentFragment();
-  const pitch = (GAUGE.halfSpanX * 2) / (GAUGE.barCount - 1);
-  gaugeBars.length = 0;
-  for (let index = 0; index < GAUGE.barCount; index += 1) {
-    const x = GAUGE.centerX - GAUGE.halfSpanX + index * pitch - GAUGE.barWidth / 2;
-    const rect = document.createElementNS(SVG_NAMESPACE, "rect");
-    rect.setAttribute("class", "gauge-bar");
-    rect.setAttribute("x", x.toFixed(1));
-    rect.setAttribute("width", String(GAUGE.barWidth));
-    rect.setAttribute("rx", "2");
-    setBarHeight(rect, GAUGE.barMinHeight);
-    fragment.append(rect);
-    gaugeBars.push(rect);
-  }
-  elements.gaugeBars.replaceChildren(fragment);
-  renderBars(0, false, false);
-}
-
-function setBarHeight(rect, height) {
-  rect.setAttribute("height", height.toFixed(1));
-  rect.setAttribute("y", (GAUGE.baselineY - height).toFixed(1));
-}
-
-// Draw the level-meter bars for an animated position in [-1, 1]. Bars fill
-// from the centre toward the position; the head bar is tallest, and each lit
-// bar is coloured by the pitch error it represents (green in tune, amber near,
-// orange far). When active but not sounding, all bars sit dim at min height.
-function renderBars(position, active, tuned) {
-  const headOffset = position * BAR_CENTER; // in bar units from centre
-  const headMagnitude = Math.max(Math.abs(headOffset), 0.001);
-  for (let index = 0; index < gaugeBars.length; index += 1) {
-    const rect = gaugeBars[index];
-    const offset = index - BAR_CENTER; // signed distance from centre in bars
-    let lit;
-    if (!active) {
-      lit = false;
-    } else if (tuned) {
-      lit = Math.abs(offset) <= 1; // a small green cluster at the centre
-    } else {
-      // On the path from centre to the head, same side as the deflection.
-      lit = offset === 0 ||
-        (headOffset >= 0 ? offset > 0 && offset <= headOffset + 0.5
-          : offset < 0 && offset >= headOffset - 0.5);
+  for (const { cents, rank } of GAUGE.ticks) {
+    for (const sign of [-1, 1]) {
+      const x = laneX(sign * cents).toFixed(1);
+      const length = rank === "major" ? 7 : 5;
+      const tick = document.createElementNS(SVG_NAMESPACE, "line");
+      tick.setAttribute("x1", x);
+      tick.setAttribute("x2", x);
+      tick.setAttribute("y1", String(GAUGE.laneY - length));
+      tick.setAttribute("y2", String(GAUGE.laneY + length));
+      tick.setAttribute("stroke", "#ffffff");
+      tick.setAttribute("stroke-width", "1");
+      tick.setAttribute("opacity", rank === "major" ? "0.35" : "0.18");
+      fragment.append(tick);
     }
-
-    if (!lit) {
-      rect.setAttribute("class", "gauge-bar");
-      setBarHeight(rect, GAUGE.barMinHeight);
-      continue;
-    }
-
-    const fraction = tuned ? 1 : Math.min(1, Math.abs(offset) / headMagnitude);
-    const height = GAUGE.barMinHeight + (GAUGE.barMaxHeight - GAUGE.barMinHeight) *
-      (tuned ? 1 - Math.abs(offset) * 0.25 : 0.35 + 0.65 * fraction);
-    setBarHeight(rect, height);
-
-    // Colour by the cents this bar's centre represents.
-    const barCents = laneToCents(offset / BAR_CENTER);
-    const magnitude = Math.abs(barCents);
-    const colour = tuned || magnitude <= CONFIG.inTuneCents
-      ? "is-green"
-      : magnitude <= CONFIG.nearTuneCents
-        ? "is-amber"
-        : "is-orange";
-    rect.setAttribute("class", `gauge-bar ${colour}`);
   }
+
+  // ♭/♯ anchors tell which side is which without a single word.
+  for (const [sign, symbol] of [[-1, "♭"], [1, "♯"]]) {
+    const label = document.createElementNS(SVG_NAMESPACE, "text");
+    label.setAttribute("x", String(GAUGE.centerX + sign * GAUGE.halfSpanX));
+    label.setAttribute("y", String(GAUGE.laneY + 28));
+    label.setAttribute("class", "gauge-end-label");
+    label.textContent = symbol;
+    fragment.append(label);
+  }
+
+  elements.gaugeTicks.replaceChildren(fragment);
 }
 
 // Power mapping to [-1, 1] with exponent > 1: the bubble is LESS sensitive
@@ -1289,20 +1275,16 @@ function lanePosition(cents) {
   return Math.sign(cents) * normalized ** CONFIG.meterCompressExponent;
 }
 
-// Inverse of lanePosition: the cents a lane position [-1, 1] represents.
-function laneToCents(position) {
-  return Math.sign(position) *
-    Math.abs(position) ** (1 / CONFIG.meterCompressExponent) * CONFIG.meterRangeCents;
+function laneX(cents) {
+  return GAUGE.centerX + lanePosition(cents) * GAUGE.halfSpanX;
 }
 
-// Advance the eased/speed-clamped meter position each frame and redraw the
-// bars from it. The clamp guarantees the deflection can never leap across the
-// meter in one frame — it travels there smoothly like a commercial tuner.
+
 function animateBubble(now) {
   if (bubbleTargetPosition === null) {
     if (bubblePosition !== null) {
       bubblePosition = null;
-      renderBars(0, false, false);
+      elements.gaugeBubble.setAttribute("hidden", "");
     }
     bubbleAnimatedAt = now;
     return;
@@ -1315,13 +1297,20 @@ function animateBubble(now) {
   if (bubblePosition === null) {
     bubblePosition = bubbleTargetPosition;
   } else {
+    // Ease toward the target, then hard-clamp the per-frame move to a maximum
+    // speed. The clamp is the guarantee the bubble can never lurch across the
+    // lane in one frame — a stiff spring let it jump a third of the lane at
+    // once, which read as the whole meter "snapping". A bounded speed makes it
+    // travel there smoothly instead, matching a commercial tuner's needle.
     const eased =
       (bubbleTargetPosition - bubblePosition) *
       Math.min(1, deltaSeconds / CONFIG.bubbleEaseTauSec);
     const maxStep = CONFIG.bubbleMaxSpeedPerSec * deltaSeconds;
     bubblePosition += clamp(eased, -maxStep, maxStep);
   }
-  renderBars(bubblePosition, true, displayTuned);
+  const x = (GAUGE.centerX + bubblePosition * GAUGE.halfSpanX).toFixed(1);
+  elements.gaugeBubble.setAttribute("transform", `translate(${x} ${GAUGE.laneY})`);
+  elements.gaugeBubble.removeAttribute("hidden");
 }
 
 function renderGaugeValue(cents) {
@@ -1338,7 +1327,7 @@ function renderNoTargetDisplay() {
   displayedCentsInt = null;
   bubbleTargetPosition = null;
   bubblePosition = null;
-  renderBars(0, false, false);
+  elements.gaugeBubble.setAttribute("hidden", "");
   hideTuneHints();
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "該当する弦なし");
