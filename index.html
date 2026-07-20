@@ -377,51 +377,41 @@
         font-variant-numeric: tabular-nums;
       }
 
-      .gauge-lane {
-        stroke: rgb(255 255 255 / 9%);
-        stroke-width: 4;
-        stroke-linecap: round;
-      }
-
-      .gauge-zone-fine {
-        stroke: color-mix(in srgb, var(--tuned) 45%, transparent);
-        stroke-width: 6;
-        stroke-linecap: round;
-      }
-
-      .gauge-notch {
-        stroke: rgb(255 255 255 / 50%);
-        stroke-width: 2;
-        stroke-linecap: round;
-      }
-
       .gauge-end-label {
-        fill: rgb(255 255 255 / 38%);
-        font-size: 14px;
+        fill: rgb(255 255 255 / 30%);
+        font-size: 15px;
         font-weight: 700;
         text-anchor: middle;
         dominant-baseline: middle;
       }
 
-      .gauge-bubble-circle {
-        fill: color-mix(in srgb, var(--panel) 92%, transparent);
-        stroke: var(--measure-color);
-        stroke-width: 2.5;
-        transition: stroke 100ms ease;
-        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--measure-color) 55%, transparent));
+      /* Level-meter bars: a row of vertical bars that light up from the centre
+         toward the detuning side, green (in tune) through amber to orange. */
+      .gauge-bar {
+        fill: rgb(255 255 255 / 10%);
+        transition: fill 90ms ease;
       }
 
-      .tuner-main[data-tuned="true"] .gauge-bubble-circle {
-        filter: drop-shadow(0 0 12px color-mix(in srgb, var(--measure-color) 75%, transparent));
+      .gauge-bar.is-green { fill: var(--tuned); }
+      .gauge-bar.is-amber { fill: #e8c53d; }
+      .gauge-bar.is-orange { fill: var(--accent); }
+
+      .gauge-bar.is-green,
+      .gauge-bar.is-amber,
+      .gauge-bar.is-orange {
+        filter: drop-shadow(0 0 3px currentColor);
       }
 
-      .gauge-bubble-text {
+      .gauge-cents-text {
         fill: var(--measure-color);
-        font-size: 13px;
+        font-size: 17px;
         font-weight: 800;
         text-anchor: middle;
-        dominant-baseline: central;
         transition: fill 100ms ease;
+      }
+
+      .tuner-main[data-signal="empty"] .gauge-cents-text {
+        fill: var(--off);
       }
 
       .gauge-readout {
@@ -435,7 +425,7 @@
       }
 
       .gauge-note {
-        font-size: 40px;
+        font-size: 42px;
         font-weight: 760;
         letter-spacing: -0.04em;
       }
@@ -445,21 +435,17 @@
         font-weight: 750;
       }
 
-      .gauge-hint {
-        fill: none;
-        stroke-width: 5;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-      }
-
-      .gauge-hint-turn {
-        stroke: var(--accent);
+      .gauge-arrow {
+        fill: var(--accent);
         filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 45%, transparent));
       }
 
-      .gauge-hint-check {
-        stroke: var(--tuned);
-        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--tuned) 55%, transparent));
+      .gauge-check-mark {
+        fill: var(--tuned);
+        font-size: 30px;
+        font-weight: 800;
+        text-anchor: middle;
+        filter: drop-shadow(0 0 8px color-mix(in srgb, var(--tuned) 55%, transparent));
       }
 
       .tuner-main[data-signal="dim"] .signal-dependent {
@@ -889,28 +875,22 @@
             class="pitch-gauge"
             viewBox="0 0 280 150"
             role="meter"
-            aria-valuemin="-50"
-            aria-valuemax="50"
+            aria-valuemin="-100"
+            aria-valuemax="100"
             aria-valuenow="0"
             aria-valuetext="音程未検出"
           >
-            <line id="gaugeLane" class="gauge-lane" aria-hidden="true"></line>
-            <line id="gaugeZoneFine" class="gauge-zone-fine" aria-hidden="true"></line>
-            <g id="gaugeTicks" aria-hidden="true"></g>
-            <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
-              <text id="gaugeNote" class="gauge-note" x="140" y="64">—</text>
-              <text id="gaugeOctave" class="gauge-octave" x="172" y="64"></text>
+              <path id="gaugeHintUp" class="gauge-arrow" d="M78 30 L68 40 L78 50 Z" hidden></path>
+              <text id="gaugeNote" class="gauge-note" x="140" y="48">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="178" y="48"></text>
+              <path id="gaugeHintDown" class="gauge-arrow" d="M202 30 L212 40 L202 50 Z" hidden></path>
+              <text id="gaugeHintCheck" class="gauge-check-mark" x="210" y="52" hidden>✓</text>
             </g>
-            <g id="gaugeBubble" class="gauge-bubble signal-dependent" aria-hidden="true" hidden>
-              <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="19"></circle>
-              <text id="gaugeCents" class="gauge-bubble-text" y="0">—</text>
-            </g>
-            <g class="signal-dependent" aria-hidden="true">
-              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M126 24 L140 10 L154 24" hidden></path>
-              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M126 10 L140 24 L154 10" hidden></path>
-              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M128 17 L136 25 L152 9" hidden></path>
-            </g>
+            <g id="gaugeBars" class="gauge-bars signal-dependent" aria-hidden="true"></g>
+            <text id="gaugeCents" class="gauge-cents-text" x="140" y="140" aria-hidden="true">—</text>
+            <text id="gaugeFlat" class="gauge-end-label" x="12" y="86">♭</text>
+            <text id="gaugeSharp" class="gauge-end-label" x="268" y="86">♯</text>
           </svg>
           <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>
         </section>
