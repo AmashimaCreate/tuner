@@ -112,6 +112,11 @@ const CONFIG = {
   chimeRefractoryMs: 800,
   chimeReleaseCents: 12.5,
   chimeBlankingMs: 500,
+  // Reference tone played when a string's note letter is tapped, so the player
+  // can tune by ear. Louder and longer than the completion chime, with a
+  // plucked-string decay.
+  referenceToneGain: 0.2,
+  referenceToneMs: 1400,
   midiA4: 69,
   stringMatchMaxCents: 600,
   // Octave correction. At a hard attack the detector can lock an octave below
@@ -315,6 +320,9 @@ let displayHoldUntil = null;
 let reselectFramesLeft = 0;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
+const activeReferenceVoices = new Set();
+let activeReferenceMaster = null;
+let referenceAudioContext = null;
 
 const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
   minHz: CONFIG.minPitchHz,
@@ -561,6 +569,14 @@ async function startMicrophoneFromGesture() {
     }
 
     audioContext = nextContext;
+    // Reference tones now ride the live mic context, so retire the dedicated
+    // playback context created for any pre-mic taps instead of leaving both open.
+    if (referenceAudioContext) {
+      stopActiveReference();
+      const retired = referenceAudioContext;
+      referenceAudioContext = null;
+      if (retired.state !== "closed") void retired.close().catch(() => {});
+    }
     mediaStream = nextStream;
     sourceNode = nextSource;
     highpassNode = nextHighpass;
@@ -1121,6 +1137,7 @@ function playInTuneChime(now) {
 
 function resetChime() {
   stopActiveChime();
+  stopActiveReference();
   chimeArmed = true;
   inTuneSince = null;
   lastChimeAt = -Infinity;
@@ -1151,6 +1168,124 @@ function stopActiveChime() {
     // The audio context may already be closed.
   }
   activeChimeMaster = null;
+}
+
+// The reference tone works before the mic is enabled, so it prefers the live
+// analysis context but falls back to a dedicated one it creates on demand
+// (the tap is a user gesture, so the browser lets us resume it).
+function ensurePlaybackContext() {
+  if (audioContext && audioContext.state === "running") return audioContext;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!referenceAudioContext || referenceAudioContext.state === "closed") {
+    try {
+      referenceAudioContext = new AudioContextClass();
+    } catch {
+      return null;
+    }
+  }
+  if (referenceAudioContext.state === "suspended") {
+    void referenceAudioContext.resume().catch(() => {});
+  }
+  return referenceAudioContext;
+}
+
+function stopActiveReference() {
+  for (const voice of activeReferenceVoices) {
+    voice.oscillator.onended = null;
+    try {
+      voice.oscillator.stop();
+    } catch {
+      // A voice that already ended only needs disconnecting.
+    }
+    try {
+      voice.oscillator.disconnect();
+      voice.noteGain.disconnect();
+    } catch {
+      // The audio context may already be closed.
+    }
+  }
+  activeReferenceVoices.clear();
+  if (!activeReferenceMaster) return;
+  try {
+    activeReferenceMaster.disconnect();
+  } catch {
+    // The audio context may already be closed.
+  }
+  activeReferenceMaster = null;
+}
+
+// Play a string's target pitch as a short, plucked-string-like tone so the
+// player can tune by ear. A few harmonics and a decaying envelope make it
+// guitar-like and easy to beat against; a pure sine is harder to match.
+function playStringReference(index) {
+  const hz = targetsHz[index];
+  if (!Number.isFinite(hz) || hz <= 0) return;
+  const context = ensurePlaybackContext();
+  if (!context) return;
+
+  stopActiveReference();
+
+  const durationSec = CONFIG.referenceToneMs / 1000;
+  const startTime = context.currentTime;
+  const nyquist = context.sampleRate / 2;
+  const masterGain = context.createGain();
+  activeReferenceMaster = masterGain;
+  masterGain.gain.setValueAtTime(1, startTime);
+  masterGain.connect(context.destination);
+
+  for (const { mult, gain } of [
+    { mult: 1, gain: 1 },
+    { mult: 2, gain: 0.42 },
+    { mult: 3, gain: 0.22 },
+    { mult: 4, gain: 0.12 },
+  ]) {
+    const frequency = hz * mult;
+    if (frequency >= nyquist) continue;
+    const oscillator = context.createOscillator();
+    const noteGain = context.createGain();
+    const voice = { oscillator, noteGain };
+    activeReferenceVoices.add(voice);
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    noteGain.gain.setValueAtTime(0.0001, startTime);
+    noteGain.gain.exponentialRampToValueAtTime(CONFIG.referenceToneGain * gain, startTime + 0.006);
+    noteGain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec);
+    oscillator.connect(noteGain);
+    noteGain.connect(masterGain);
+    oscillator.start(startTime);
+    oscillator.stop(startTime + durationSec + 0.05);
+    oscillator.onended = () => {
+      activeReferenceVoices.delete(voice);
+      try {
+        oscillator.disconnect();
+        noteGain.disconnect();
+      } catch {
+        // The audio context may already have been closed.
+      }
+    };
+  }
+
+  const masterEnd = startTime + durationSec + 0.1;
+  setTimeout(() => {
+    if (activeReferenceMaster !== masterGain) return;
+    try {
+      masterGain.disconnect();
+    } catch {
+      // The audio context may already have been closed.
+    }
+    activeReferenceMaster = null;
+  }, (masterEnd - startTime) * 1000);
+
+  // While the mic is live, freeze analysis for the tone's length so the meter
+  // and completion chime do not react to the app's own sound through the mic.
+  if (microphoneActive) {
+    analysisBlankedUntil = Math.max(
+      analysisBlankedUntil,
+      performance.now() + CONFIG.referenceToneMs + 120,
+    );
+    elements.tunerMain.dataset.inputBlanked = "true";
+  }
 }
 
 function dimDisplay() {
@@ -1390,6 +1525,7 @@ function onPegTap(index) {
   resetChime();
   resetDetectionData();
   resetDisplay();
+  playStringReference(index);
 }
 
 function applyTuning(id, { persist }) {
@@ -1688,8 +1824,8 @@ function renderHeadstock() {
       chromatic
         ? `${stringNumber}弦、クロマチックでは手動選択できません`
         : isManual
-          ? `${stringNumber}弦 ${note} の手動選択を解除`
-          : `${stringNumber}弦 ${note} を手動選択`,
+          ? `${stringNumber}弦 ${note} の基準音を再生、手動選択を解除`
+          : `${stringNumber}弦 ${note} の基準音を再生して手動選択`,
     );
   }
 
