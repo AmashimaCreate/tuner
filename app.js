@@ -320,7 +320,8 @@ let displayHoldUntil = null;
 let reselectFramesLeft = 0;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
-const activeReferenceVoices = new Set();
+let activeReferenceSource = null;
+let activeReferenceFilter = null;
 let activeReferenceMaster = null;
 let referenceAudioContext = null;
 
@@ -1191,33 +1192,91 @@ function ensurePlaybackContext() {
 }
 
 function stopActiveReference() {
-  for (const voice of activeReferenceVoices) {
-    voice.oscillator.onended = null;
+  if (activeReferenceSource) {
+    activeReferenceSource.onended = null;
     try {
-      voice.oscillator.stop();
+      activeReferenceSource.stop();
     } catch {
-      // A voice that already ended only needs disconnecting.
+      // A source that already ended only needs disconnecting.
     }
     try {
-      voice.oscillator.disconnect();
-      voice.noteGain.disconnect();
+      activeReferenceSource.disconnect();
+    } catch {
+      // The audio context may already be closed.
+    }
+    activeReferenceSource = null;
+  }
+  for (const node of [activeReferenceFilter, activeReferenceMaster]) {
+    if (!node) continue;
+    try {
+      node.disconnect();
     } catch {
       // The audio context may already be closed.
     }
   }
-  activeReferenceVoices.clear();
-  if (!activeReferenceMaster) return;
-  try {
-    activeReferenceMaster.disconnect();
-  } catch {
-    // The audio context may already be closed.
-  }
+  activeReferenceFilter = null;
   activeReferenceMaster = null;
 }
 
-// Play a string's target pitch as a short, plucked-string-like tone so the
-// player can tune by ear. A few harmonics and a decaying envelope make it
-// guitar-like and easy to beat against; a pure sine is harder to match.
+// Synthesise a plucked steel string by physical modelling (Karplus–Strong): a
+// short noise burst excites a feedback delay line whose length is one period,
+// so the pitch is exact while a one-pole loop filter bleeds off the high
+// partials the way a real string does — a genuine pluck, not a stack of sines.
+// The delay uses a fractional (interpolated) read so the fundamental lands on
+// the target frequency to within a cent, which matters for a tuning reference.
+function renderPluck(sampleRate, frequency, durationSec) {
+  const total = Math.max(1, Math.floor(sampleRate * durationSec));
+  const out = new Float32Array(total);
+  const period = sampleRate / frequency;
+  // The averaging loop filter adds ~half a sample of delay; take it back out of
+  // the delay line so the total loop delay is exactly one period.
+  const delayLen = Math.max(2, period - 0.5);
+  const intDelay = Math.floor(delayLen);
+  const fracDelay = delayLen - intDelay;
+  const size = intDelay + 2;
+  const ring = new Float32Array(size);
+  // Per-sample loss tuned so the fundamental decays to a few percent by the end.
+  const loss = Math.pow(0.05, 1 / total);
+  const burst = intDelay;
+  let write = 0;
+  let prevDelayed = 0;
+  let softNoise = 0;
+  let peak = 0;
+  for (let n = 0; n < total; n += 1) {
+    const read0 = (write - intDelay + size) % size;
+    const read1 = (write - intDelay - 1 + size) % size;
+    const delayed = (1 - fracDelay) * ring[read0] + fracDelay * ring[read1];
+    // One-pole averaging = the string's frequency-dependent damping.
+    const damped = 0.5 * (delayed + prevDelayed);
+    prevDelayed = delayed;
+    let sample = loss * damped;
+    if (n < burst) {
+      // Soften the pick so the attack is warm, not a white-noise click.
+      softNoise = 0.55 * (Math.random() * 2 - 1) + 0.45 * softNoise;
+      sample += softNoise;
+    }
+    ring[write] = sample;
+    out[n] = sample;
+    write = write + 1 === size ? 0 : write + 1;
+    const magnitude = sample < 0 ? -sample : sample;
+    if (magnitude > peak) peak = magnitude;
+  }
+  // Normalise so every string is equally loud, then fade the edges to kill clicks.
+  const norm = peak > 1e-6 ? 0.9 / peak : 1;
+  const attack = Math.min(total, Math.round(sampleRate * 0.002));
+  const release = Math.min(total, Math.round(sampleRate * 0.03));
+  for (let n = 0; n < total; n += 1) {
+    let gain = norm;
+    if (n < attack) gain *= n / attack;
+    if (n >= total - release) gain *= (total - n) / release;
+    out[n] *= gain;
+  }
+  return out;
+}
+
+// Play a string's target pitch as a plucked-string tone so the player can tune
+// by ear. Rendered offline (renderPluck) and played through a warm low-pass so
+// it reads as an acoustic pluck.
 function playStringReference(index) {
   const hz = targetsHz[index];
   if (!Number.isFinite(hz) || hz <= 0) return;
@@ -1227,55 +1286,42 @@ function playStringReference(index) {
   stopActiveReference();
 
   const durationSec = CONFIG.referenceToneMs / 1000;
-  const startTime = context.currentTime;
-  const nyquist = context.sampleRate / 2;
+  const samples = renderPluck(context.sampleRate, hz, durationSec);
+  const buffer = context.createBuffer(1, samples.length, context.sampleRate);
+  buffer.copyToChannel(samples, 0);
+
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+
+  // Roll off the top so the pluck sounds like a body, not fizz.
+  const tone = context.createBiquadFilter();
+  tone.type = "lowpass";
+  tone.frequency.value = Math.min(4200, context.sampleRate / 2 - 100);
+  tone.Q.value = 0.6;
+
   const masterGain = context.createGain();
+  masterGain.gain.value = CONFIG.referenceToneGain;
+
+  source.connect(tone).connect(masterGain).connect(context.destination);
+
+  activeReferenceSource = source;
+  activeReferenceFilter = tone;
   activeReferenceMaster = masterGain;
-  masterGain.gain.setValueAtTime(1, startTime);
-  masterGain.connect(context.destination);
 
-  for (const { mult, gain } of [
-    { mult: 1, gain: 1 },
-    { mult: 2, gain: 0.42 },
-    { mult: 3, gain: 0.22 },
-    { mult: 4, gain: 0.12 },
-  ]) {
-    const frequency = hz * mult;
-    if (frequency >= nyquist) continue;
-    const oscillator = context.createOscillator();
-    const noteGain = context.createGain();
-    const voice = { oscillator, noteGain };
-    activeReferenceVoices.add(voice);
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(frequency, startTime);
-    noteGain.gain.setValueAtTime(0.0001, startTime);
-    noteGain.gain.exponentialRampToValueAtTime(CONFIG.referenceToneGain * gain, startTime + 0.006);
-    noteGain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec);
-    oscillator.connect(noteGain);
-    noteGain.connect(masterGain);
-    oscillator.start(startTime);
-    oscillator.stop(startTime + durationSec + 0.05);
-    oscillator.onended = () => {
-      activeReferenceVoices.delete(voice);
-      try {
-        oscillator.disconnect();
-        noteGain.disconnect();
-      } catch {
-        // The audio context may already have been closed.
-      }
-    };
-  }
-
-  const masterEnd = startTime + durationSec + 0.1;
-  setTimeout(() => {
-    if (activeReferenceMaster !== masterGain) return;
+  source.onended = () => {
+    if (activeReferenceSource !== source) return;
     try {
+      source.disconnect();
+      tone.disconnect();
       masterGain.disconnect();
     } catch {
       // The audio context may already have been closed.
     }
+    activeReferenceSource = null;
+    activeReferenceFilter = null;
     activeReferenceMaster = null;
-  }, (masterEnd - startTime) * 1000);
+  };
+  source.start();
 
   // While the mic is live, freeze analysis for the tone's length so the meter
   // and completion chime do not react to the app's own sound through the mic.
