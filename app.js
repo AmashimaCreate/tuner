@@ -324,6 +324,12 @@ let activeReferenceSource = null;
 let activeReferenceFilter = null;
 let activeReferenceMaster = null;
 let referenceAudioContext = null;
+// Recorded acoustic-guitar reference samples (University of Iowa MIS, free of
+// use restrictions). Decoded once and reused; declared here so the init-time
+// loadGuitarSamples() call is not in these bindings' temporal dead zone.
+const GUITAR_SAMPLE_NOTES = ["E2", "A2", "D3", "G3", "B3", "E4"];
+const guitarSampleCache = new Map();
+let guitarSamplesPromise = null;
 
 const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
   minHz: CONFIG.minPitchHz,
@@ -374,6 +380,10 @@ elements.debugPanel.hidden = !DEBUG_ENABLED;
 setMeterRangeAttributes();
 updateDebugPanel();
 showInitialEnvironmentError();
+
+// Preload the recorded guitar reference samples in the background so a peg tap
+// sounds instantly; a tap before they arrive falls back to the modelled pluck.
+void loadGuitarSamples();
 
 elements.debugCapture.addEventListener("click", startDiagnosticCapture);
 
@@ -1277,23 +1287,127 @@ function renderPluck(sampleRate, frequency, durationSec) {
 // Play a string's target pitch as a plucked-string tone so the player can tune
 // by ear. Rendered offline (renderPluck) and played through a warm low-pass so
 // it reads as an acoustic pluck.
-function playStringReference(index) {
-  const hz = targetsHz[index];
-  if (!Number.isFinite(hz) || hz <= 0) return;
-  const context = ensurePlaybackContext();
-  if (!context) return;
+// Autocorrelation estimate of a buffer's fundamental, so a recorded sample can
+// be pitch-locked exactly onto the target (a tuning reference must be in tune).
+function measureFundamental(samples, sampleRate, approxHz) {
+  const period = sampleRate / approxHz;
+  const minLag = Math.max(2, Math.floor(period * 0.6));
+  const maxLag = Math.ceil(period * 1.6);
+  const start = Math.min(samples.length >> 2, Math.floor(sampleRate * 0.3));
+  const end = Math.min(samples.length, start + Math.floor(sampleRate * 0.4));
+  const correlate = (lag) => {
+    let sum = 0;
+    for (let i = start; i + lag < end; i += 1) sum += samples[i] * samples[i + lag];
+    return sum;
+  };
+  let bestLag = -1;
+  let best = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    const value = correlate(lag);
+    if (value > best) { best = value; bestLag = lag; }
+  }
+  if (bestLag < 1) return approxHz;
+  const y0 = correlate(bestLag - 1);
+  const y1 = correlate(bestLag);
+  const y2 = correlate(bestLag + 1);
+  const denom = y0 - 2 * y1 + y2;
+  const shift = denom !== 0 ? (0.5 * (y0 - y2)) / denom : 0;
+  return sampleRate / (bestLag + shift);
+}
 
-  stopActiveReference();
+// Fetch and decode the recorded guitar notes once (via an OfflineAudioContext so
+// it needs no user gesture), normalising each and measuring its true pitch.
+function loadGuitarSamples() {
+  if (guitarSamplesPromise) return guitarSamplesPromise;
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (typeof fetch !== "function" || !OfflineCtx) {
+    guitarSamplesPromise = Promise.resolve();
+    return guitarSamplesPromise;
+  }
+  guitarSamplesPromise = (async () => {
+    const decodeContext = new OfflineCtx(1, 1, 44100);
+    await Promise.all(GUITAR_SAMPLE_NOTES.map(async (note) => {
+      try {
+        const response = await fetch(`samples/guitar/${note}.mp3`);
+        if (!response.ok) return;
+        const encoded = await response.arrayBuffer();
+        const buffer = await decodeContext.decodeAudioData(encoded);
+        const data = buffer.getChannelData(0);
+        let peak = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const magnitude = Math.abs(data[i]);
+          if (magnitude > peak) peak = magnitude;
+        }
+        if (peak > 1e-6) {
+          const normalise = 0.95 / peak;
+          for (let i = 0; i < data.length; i += 1) data[i] *= normalise;
+        }
+        const nominalHz = 440 * 2 ** ((noteToMidi(note) - CONFIG.midiA4) / 12);
+        const measuredHz = measureFundamental(data, buffer.sampleRate, nominalHz);
+        guitarSampleCache.set(note, { buffer, measuredHz });
+      } catch {
+        // A sample that fails to load just leaves the synth fallback in place.
+      }
+    }));
+  })();
+  return guitarSamplesPromise;
+}
 
-  const durationSec = CONFIG.referenceToneMs / 1000;
-  const samples = renderPluck(context.sampleRate, hz, durationSec);
+// Nearest loaded sample by log-frequency, so the playback-rate stretch is small.
+// Rejects anything more than ~3.5 semitones away — that guards the cold-load
+// window (only some notes decoded) from substituting a wrong-octave sample, and
+// sends far-off alternate tunings to the synth fallback instead of a big stretch.
+const SAMPLE_MAX_LOG2_DISTANCE = 0.29;
+function pickGuitarSample(hz) {
+  let best = null;
+  let bestDistance = Infinity;
+  for (const entry of guitarSampleCache.values()) {
+    const distance = Math.abs(Math.log2(hz / entry.measuredHz));
+    if (distance < bestDistance) { bestDistance = distance; best = entry; }
+  }
+  return bestDistance <= SAMPLE_MAX_LOG2_DISTANCE ? best : null;
+}
+
+function playGuitarSample(context, sample, targetHz) {
+  const source = context.createBufferSource();
+  source.buffer = sample.buffer;
+  // Resample so the recording lands exactly on the target frequency; clamp to a
+  // sane range so a bad pitch estimate can never produce a runaway rate.
+  const rawRate = targetHz / sample.measuredHz;
+  const rate = Number.isFinite(rawRate) ? clamp(rawRate, 0.5, 2) : 1;
+  source.playbackRate.value = rate;
+
+  const masterGain = context.createGain();
+  masterGain.gain.value = CONFIG.referenceToneGain;
+  source.connect(masterGain).connect(context.destination);
+
+  activeReferenceSource = source;
+  activeReferenceFilter = null;
+  activeReferenceMaster = masterGain;
+  source.onended = () => {
+    if (activeReferenceSource !== source) return;
+    try {
+      source.disconnect();
+      masterGain.disconnect();
+    } catch {
+      // The audio context may already have been closed.
+    }
+    activeReferenceSource = null;
+    activeReferenceMaster = null;
+  };
+  source.start();
+  return (sample.buffer.duration / rate) * 1000;
+}
+
+// Fallback used until the recorded samples finish loading (or if they fail):
+// the modelled pluck. Kept so a tap always makes a sound.
+function playSynthPluck(context, hz) {
+  const samples = renderPluck(context.sampleRate, hz, CONFIG.referenceToneMs / 1000);
   const buffer = context.createBuffer(1, samples.length, context.sampleRate);
   buffer.copyToChannel(samples, 0);
-
   const source = context.createBufferSource();
   source.buffer = buffer;
 
-  // Roll off the top so the pluck sounds like a body, not fizz.
   const tone = context.createBiquadFilter();
   tone.type = "lowpass";
   tone.frequency.value = Math.min(4200, context.sampleRate / 2 - 100);
@@ -1301,13 +1415,11 @@ function playStringReference(index) {
 
   const masterGain = context.createGain();
   masterGain.gain.value = CONFIG.referenceToneGain;
-
   source.connect(tone).connect(masterGain).connect(context.destination);
 
   activeReferenceSource = source;
   activeReferenceFilter = tone;
   activeReferenceMaster = masterGain;
-
   source.onended = () => {
     if (activeReferenceSource !== source) return;
     try {
@@ -1322,13 +1434,33 @@ function playStringReference(index) {
     activeReferenceMaster = null;
   };
   source.start();
+  return CONFIG.referenceToneMs;
+}
 
-  // While the mic is live, freeze analysis for the tone's length so the meter
-  // and completion chime do not react to the app's own sound through the mic.
+// Play a string's target pitch as a recorded acoustic-guitar note (nearest
+// sample, resampled exactly onto the target) so the player can tune by ear.
+function playStringReference(index) {
+  const hz = targetsHz[index];
+  if (!Number.isFinite(hz) || hz <= 0) return;
+  const context = ensurePlaybackContext();
+  if (!context) return;
+
+  stopActiveReference();
+
+  const sample = pickGuitarSample(hz);
+  const toneMs = sample
+    ? playGuitarSample(context, sample, hz)
+    : playSynthPluck(context, hz);
+  // Samples not ready yet — start loading them for next time.
+  if (!sample) void loadGuitarSamples();
+
+  // While the mic is live, freeze analysis for the whole tone so the meter and
+  // completion chime never react to the app's own sound through the mic — a
+  // shorter window would let the still-ringing reference read as "in tune".
   if (microphoneActive) {
     analysisBlankedUntil = Math.max(
       analysisBlankedUntil,
-      performance.now() + CONFIG.referenceToneMs + 120,
+      performance.now() + toneMs + 120,
     );
     elements.tunerMain.dataset.inputBlanked = "true";
   }
