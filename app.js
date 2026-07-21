@@ -64,7 +64,7 @@ const CONFIG = {
   refinedHoldMs: 250,
   jitterWindowMs: 1000,
   jitterMinSamples: 8,
-  inTuneCents: 5,
+  inTuneCents: 9,
   // The green state enters and leaves at different thresholds so measurement
   // jitter at the boundary cannot strobe the display.
   tunedEnterCents: 4,
@@ -190,9 +190,9 @@ const HEADSTOCK_TYPES = {
   },
 };
 const GAUGE = {
-  centerX: 140,
+  centerX: 180,
   laneY: 104,
-  halfSpanX: 118,
+  halfSpanX: 162,
   // Ticks at these cents; positions follow the piecewise scale, so the
   // in-tune band (±5¢) occupies a quarter of each half-lane.
   ticks: [
@@ -235,6 +235,7 @@ const elements = {
   gaugeLane: document.querySelector("#gaugeLane"),
   gaugeFill: document.querySelector("#gaugeFill"),
   gaugeZoneFine: document.querySelector("#gaugeZoneFine"),
+  gaugeCenterLine: document.querySelector("#gaugeCenterLine"),
   gaugeNotch: document.querySelector("#gaugeNotch"),
   gaugeBubble: document.querySelector("#gaugeBubble"),
   gaugeBubbleCircle: document.querySelector("#gaugeBubbleCircle"),
@@ -1558,6 +1559,13 @@ function initializeGauge() {
   elements.gaugeNotch.setAttribute("x2", String(GAUGE.centerX));
   elements.gaugeNotch.setAttribute("y1", String(GAUGE.laneY - 14));
   elements.gaugeNotch.setAttribute("y2", String(GAUGE.laneY + 14));
+
+  // The in-tune centre line stands taller than the notch so it reads as a
+  // distinct "dead centre" marker when the note lands.
+  elements.gaugeCenterLine.setAttribute("x1", String(GAUGE.centerX));
+  elements.gaugeCenterLine.setAttribute("x2", String(GAUGE.centerX));
+  elements.gaugeCenterLine.setAttribute("y1", String(GAUGE.laneY - 34));
+  elements.gaugeCenterLine.setAttribute("y2", String(GAUGE.laneY + 34));
 
   const fragment = document.createDocumentFragment();
   for (const { cents, rank } of GAUGE.ticks) {

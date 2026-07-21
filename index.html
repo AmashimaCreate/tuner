@@ -248,8 +248,8 @@
       .peg {
         position: absolute;
         z-index: 2;
-        width: 48px;
-        height: 48px;
+        width: 56px;
+        height: 56px;
         padding: 0;
         transform: translate(-50%, -50%);
         border: 0;
@@ -294,8 +294,8 @@
       .peg-label {
         position: absolute;
         top: 50%;
-        width: 44px;
-        height: 44px;
+        width: 56px;
+        height: 56px;
         transform: translateY(-50%);
         color: #aeb8c4;
         border: 1px solid rgb(255 255 255 / 7%);
@@ -304,7 +304,7 @@
         box-shadow: 0 5px 14px rgb(0 0 0 / 22%);
         display: grid;
         place-items: center;
-        font-size: 12px;
+        font-size: 16px;
         font-weight: 720;
         line-height: 1;
         text-align: center;
@@ -370,7 +370,7 @@
       }
 
       .pitch-gauge {
-        width: min(100%, 280px);
+        width: min(100%, 380px);
         height: 150px;
         display: block;
         overflow: visible;
@@ -395,8 +395,8 @@
       .gauge-fill.is-orange { stroke: var(--accent); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent)); }
 
       .gauge-zone-fine {
-        stroke: color-mix(in srgb, var(--tuned) 30%, transparent);
-        stroke-width: 6;
+        stroke: color-mix(in srgb, var(--tuned) 32%, transparent);
+        stroke-width: 9;
         stroke-linecap: round;
         transition: stroke 140ms ease, filter 140ms ease;
       }
@@ -404,7 +404,7 @@
       /* The landing zone lights up as the note lands in tune. */
       .tuner-main[data-tuned="true"] .gauge-zone-fine {
         stroke: var(--tuned);
-        filter: drop-shadow(0 0 7px color-mix(in srgb, var(--tuned) 70%, transparent));
+        filter: drop-shadow(0 0 8px color-mix(in srgb, var(--tuned) 70%, transparent));
       }
 
       .gauge-notch {
@@ -415,6 +415,20 @@
       }
       .tuner-main[data-tuned="true"] .gauge-notch {
         stroke: var(--tuned);
+      }
+
+      /* A crisp vertical line appears at dead centre the moment the note is in
+         tune, confirming the bubble is exactly on target. */
+      .gauge-center-line {
+        stroke: var(--tuned);
+        stroke-width: 2.5;
+        stroke-linecap: round;
+        opacity: 0;
+        transition: opacity 140ms ease;
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--tuned) 75%, transparent));
+      }
+      .tuner-main[data-tuned="true"] .gauge-center-line {
+        opacity: 1;
       }
 
       .gauge-end-label {
@@ -928,7 +942,7 @@
           <svg
             id="pitchMeter"
             class="pitch-gauge"
-            viewBox="0 0 280 150"
+            viewBox="0 0 360 150"
             role="meter"
             aria-valuemin="-50"
             aria-valuemax="50"
@@ -939,19 +953,20 @@
             <line id="gaugeFill" class="gauge-fill" aria-hidden="true" hidden></line>
             <line id="gaugeZoneFine" class="gauge-zone-fine" aria-hidden="true"></line>
             <g id="gaugeTicks" aria-hidden="true"></g>
+            <line id="gaugeCenterLine" class="gauge-center-line" aria-hidden="true"></line>
             <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
-              <text id="gaugeNote" class="gauge-note" x="140" y="64">—</text>
-              <text id="gaugeOctave" class="gauge-octave" x="172" y="64"></text>
+              <text id="gaugeNote" class="gauge-note" x="180" y="64">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="212" y="64"></text>
             </g>
             <g id="gaugeBubble" class="gauge-bubble signal-dependent" aria-hidden="true" hidden>
               <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="19"></circle>
               <text id="gaugeCents" class="gauge-bubble-text" y="0">—</text>
             </g>
             <g class="signal-dependent" aria-hidden="true">
-              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M126 24 L140 10 L154 24" hidden></path>
-              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M126 10 L140 24 L154 10" hidden></path>
-              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M128 17 L136 25 L152 9" hidden></path>
+              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M166 24 L180 10 L194 24" hidden></path>
+              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M166 10 L180 24 L194 10" hidden></path>
+              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M168 17 L176 25 L192 9" hidden></path>
             </g>
           </svg>
           <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>
