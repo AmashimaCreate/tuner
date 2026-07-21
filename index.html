@@ -370,7 +370,7 @@
       }
 
       .pitch-gauge {
-        width: min(100%, 380px);
+        width: min(100%, 280px);
         height: 150px;
         display: block;
         overflow: visible;
@@ -942,7 +942,7 @@
           <svg
             id="pitchMeter"
             class="pitch-gauge"
-            viewBox="0 0 360 150"
+            viewBox="0 0 280 150"
             role="meter"
             aria-valuemin="-50"
             aria-valuemax="50"
@@ -956,17 +956,17 @@
             <line id="gaugeCenterLine" class="gauge-center-line" aria-hidden="true"></line>
             <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
-              <text id="gaugeNote" class="gauge-note" x="180" y="64">—</text>
-              <text id="gaugeOctave" class="gauge-octave" x="212" y="64"></text>
+              <text id="gaugeNote" class="gauge-note" x="140" y="64">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="172" y="64"></text>
             </g>
             <g id="gaugeBubble" class="gauge-bubble signal-dependent" aria-hidden="true" hidden>
               <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="19"></circle>
               <text id="gaugeCents" class="gauge-bubble-text" y="0">—</text>
             </g>
             <g class="signal-dependent" aria-hidden="true">
-              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M166 24 L180 10 L194 24" hidden></path>
-              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M166 10 L180 24 L194 10" hidden></path>
-              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M168 17 L176 25 L192 9" hidden></path>
+              <path id="gaugeHintUp" class="gauge-hint gauge-hint-turn" d="M126 24 L140 10 L154 24" hidden></path>
+              <path id="gaugeHintDown" class="gauge-hint gauge-hint-turn" d="M126 10 L140 24 L154 10" hidden></path>
+              <path id="gaugeHintCheck" class="gauge-hint gauge-hint-check" d="M128 17 L136 25 L152 9" hidden></path>
             </g>
           </svg>
           <div id="tuneStatus" class="sr-only" role="status" aria-live="polite"></div>

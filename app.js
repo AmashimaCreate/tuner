@@ -190,9 +190,9 @@ const HEADSTOCK_TYPES = {
   },
 };
 const GAUGE = {
-  centerX: 180,
+  centerX: 140,
   laneY: 104,
-  halfSpanX: 162,
+  halfSpanX: 118,
   // Ticks at these cents; positions follow the piecewise scale, so the
   // in-tune band (±5¢) occupies a quarter of each half-lane.
   ticks: [
