@@ -43,6 +43,17 @@ const CONFIG = {
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
   displayHoldMs: 1500,
+  // Onset-settle gate: at a fresh pluck the attack transient can be detected
+  // wildly off (a hard B3 momentarily reads ~280 Hz => +221c). Show the note
+  // letter but hold the needle blank until the pitch has stayed within
+  // displaySettleSpreadCents for displaySettleMs, so a transient is never
+  // committed or latched (the same idea as GuitarTuna discarding bad samples).
+  displaySettleMs: 90,
+  displaySettleSpreadCents: 30,
+  // Safety valve: if a note never settles (sustained vibrato, or turning the
+  // peg fast right at the attack), commit anyway after this long so the needle
+  // can never stay blank — a transient is always gone well before this.
+  displaySettleMaxMs: 350,
   // Display smoothing (One-Euro): the cutoff rises with the sustained rate of
   // change, so a held note is smoothed hard (steady) while a peg turn passes
   // through almost instantly. beta sets how far motion opens the cutoff.
@@ -292,6 +303,9 @@ let previousMidi = null;
 let chromaticHeldMidi = null;
 let smoothedCents = null;
 let lastDisplayAt = null;
+let displayConfirmed = false;
+let onsetSamples = [];
+let onsetStart = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -951,19 +965,55 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   const measuredHz = fineValid ? refinedHz : stableHz;
   const measuredCents = centsBetween(measuredHz, targetHz);
 
-  if (midi !== previousMidi) resetCentsFilter();
-  smoothedCents = filterCents(measuredCents, now);
-  lastDisplayAt = now;
-  previousMidi = midi;
-
   const noteIndex = ((midi % NOTE_NAMES.length) + NOTE_NAMES.length) % NOTE_NAMES.length;
   const octave = Math.floor(midi / NOTE_NAMES.length) - 1;
+  const noteName = NOTE_NAMES[noteIndex];
+
+  // Onset-settle gate. A fresh note episode (new note, or the tracker just
+  // (re)acquired/switched) starts unconfirmed: gather its cents and only commit
+  // once they hold within displaySettleSpreadCents for displaySettleMs. A brief
+  // attack transient never gathers a settled window, so it is neither shown nor
+  // latched — the needle simply appears already on the right value.
+  if (reselectString || midi !== previousMidi) {
+    resetCentsFilter();
+    displayConfirmed = false;
+    onsetSamples = [];
+    onsetStart = now;
+  }
+  previousMidi = midi;
+  lastDisplayAt = now;
+
+  if (!displayConfirmed) {
+    onsetSamples.push(measuredCents);
+    if (onsetSamples.length > 12) onsetSamples.shift();
+    const spread = Math.max(...onsetSamples) - Math.min(...onsetSamples);
+    const waited = now - onsetStart;
+    const settled =
+      waited >= CONFIG.displaySettleMs &&
+      onsetSamples.length >= 3 &&
+      spread <= CONFIG.displaySettleSpreadCents;
+    const timedOut = waited >= CONFIG.displaySettleMaxMs && onsetSamples.length >= 3;
+    if (settled || timedOut) {
+      // Seed the filter at the settled median so the needle appears in place.
+      const sorted = [...onsetSamples].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      resetCentsFilter();
+      smoothedCents = filterCents(median, now);
+      displayConfirmed = true;
+    } else {
+      renderConfirmingDisplay(noteName, octave);
+      updateDebugPanel({ stableHz, midi, cents: Number.NaN });
+      return;
+    }
+  } else {
+    smoothedCents = filterCents(measuredCents, now);
+  }
+
   const gaugeCents = clamp(
     smoothedCents,
     -CONFIG.meterRangeCents,
     CONFIG.meterRangeCents,
   );
-  const noteName = NOTE_NAMES[noteIndex];
   // The printed number flips only when the value clearly leaves the shown
   // integer; +-1 c wobble across a rounding boundary must not strobe the text.
   if (
@@ -1024,6 +1074,25 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   }
 
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
+}
+
+// Shown while a fresh note is still settling: the note letter is known, but the
+// needle is held blank so an attack transient never appears on the meter.
+function renderConfirmingDisplay(noteName, octave) {
+  elements.gaugeNote.textContent = noteName;
+  elements.gaugeOctave.textContent = String(octave);
+  elements.gaugeCents.textContent = "·";
+  displayedCentsInt = null;
+  displayTuned = false;
+  elements.pitchMeter.setAttribute("aria-valuetext", `${noteName}${octave}、測定中`);
+  // Leave the bubble where it was: on a first acquisition it is already hidden,
+  // and on a re-pluck of a sustained note this avoids blinking the needle out.
+  elements.tunerMain.dataset.signal = "active";
+  elements.tunerMain.dataset.tuned = "false";
+  elements.tunerMain.dataset.direction = "none";
+  setHiddenState(elements.gaugeHintUp, true);
+  setHiddenState(elements.gaugeHintDown, true);
+  setHiddenState(elements.gaugeHintCheck, true);
 }
 
 function setHiddenState(element, hidden) {
@@ -1535,6 +1604,8 @@ function clearPitchHistory({ clearStableValue }) {
   displayedCentsInt = null;
   previousMidi = null;
   chromaticHeldMidi = null;
+  displayConfirmed = false;
+  onsetSamples = [];
   smoothedCents = null;
   lastDisplayAt = null;
   displayTuned = false;
@@ -1665,6 +1736,8 @@ function renderGaugeValue(cents) {
 function renderNoTargetDisplay() {
   previousMidi = null;
   smoothedCents = null;
+  displayConfirmed = false;
+  onsetSamples = [];
   lastDisplayAt = null;
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
