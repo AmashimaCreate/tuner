@@ -383,16 +383,38 @@
         stroke-linecap: round;
       }
 
+      /* Coloured bar from centre to the bubble: shows direction and how far
+         off at a glance, green when close, amber near, orange far. */
+      .gauge-fill {
+        stroke-width: 5;
+        stroke-linecap: round;
+        transition: stroke 120ms ease;
+      }
+      .gauge-fill.is-green { stroke: var(--tuned); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--tuned) 55%, transparent)); }
+      .gauge-fill.is-amber { stroke: #e8c53d; filter: drop-shadow(0 0 5px color-mix(in srgb, #e8c53d 45%, transparent)); }
+      .gauge-fill.is-orange { stroke: var(--accent); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent)); }
+
       .gauge-zone-fine {
-        stroke: color-mix(in srgb, var(--tuned) 45%, transparent);
+        stroke: color-mix(in srgb, var(--tuned) 30%, transparent);
         stroke-width: 6;
         stroke-linecap: round;
+        transition: stroke 140ms ease, filter 140ms ease;
+      }
+
+      /* The landing zone lights up as the note lands in tune. */
+      .tuner-main[data-tuned="true"] .gauge-zone-fine {
+        stroke: var(--tuned);
+        filter: drop-shadow(0 0 7px color-mix(in srgb, var(--tuned) 70%, transparent));
       }
 
       .gauge-notch {
         stroke: rgb(255 255 255 / 50%);
         stroke-width: 2;
         stroke-linecap: round;
+        transition: stroke 140ms ease;
+      }
+      .tuner-main[data-tuned="true"] .gauge-notch {
+        stroke: var(--tuned);
       }
 
       .gauge-end-label {
@@ -412,8 +434,22 @@
       }
 
       .tuner-main[data-tuned="true"] .gauge-bubble-circle {
-        filter: drop-shadow(0 0 12px color-mix(in srgb, var(--measure-color) 75%, transparent));
+        animation: gauge-lock-pulse 1.3s ease-in-out infinite;
       }
+
+      @keyframes gauge-lock-pulse {
+        0%, 100% { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--tuned) 65%, transparent)); }
+        50% { filter: drop-shadow(0 0 16px color-mix(in srgb, var(--tuned) 90%, transparent)); }
+      }
+
+      /* Bubble colour tracks how far off the note is: green in tune, amber near,
+         orange far — the same language as the fill bar. */
+      .gauge-bubble.is-green .gauge-bubble-circle { stroke: var(--tuned); }
+      .gauge-bubble.is-green .gauge-bubble-text { fill: var(--tuned); }
+      .gauge-bubble.is-amber .gauge-bubble-circle { stroke: #e8c53d; filter: drop-shadow(0 0 6px color-mix(in srgb, #e8c53d 55%, transparent)); }
+      .gauge-bubble.is-amber .gauge-bubble-text { fill: #e8c53d; }
+      .gauge-bubble.is-orange .gauge-bubble-circle { stroke: var(--accent); }
+      .gauge-bubble.is-orange .gauge-bubble-text { fill: var(--accent); }
 
       .gauge-bubble-text {
         fill: var(--measure-color);
@@ -423,6 +459,11 @@
         dominant-baseline: central;
         transition: fill 100ms ease;
       }
+
+      /* The ♭/♯ end on the side the note is deviating toward lights up. */
+      .gauge-end-label { transition: fill 140ms ease; }
+      .tuner-main[data-direction="flat"] .gauge-end-flat { fill: var(--accent); }
+      .tuner-main[data-direction="sharp"] .gauge-end-sharp { fill: var(--accent); }
 
       .gauge-readout {
         fill: var(--measure-color);
@@ -895,6 +936,7 @@
             aria-valuetext="音程未検出"
           >
             <line id="gaugeLane" class="gauge-lane" aria-hidden="true"></line>
+            <line id="gaugeFill" class="gauge-fill" aria-hidden="true" hidden></line>
             <line id="gaugeZoneFine" class="gauge-zone-fine" aria-hidden="true"></line>
             <g id="gaugeTicks" aria-hidden="true"></g>
             <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>

@@ -233,6 +233,7 @@ const elements = {
   headstockImage: document.querySelector("#headstock-image"),
   gaugeTicks: document.querySelector("#gaugeTicks"),
   gaugeLane: document.querySelector("#gaugeLane"),
+  gaugeFill: document.querySelector("#gaugeFill"),
   gaugeZoneFine: document.querySelector("#gaugeZoneFine"),
   gaugeNotch: document.querySelector("#gaugeNotch"),
   gaugeBubble: document.querySelector("#gaugeBubble"),
@@ -297,6 +298,7 @@ let displayedCentsInt = null;
 let bubbleTargetPosition = null;
 let bubblePosition = null;
 let bubbleAnimatedAt = null;
+let gaugeBand = "is-green";
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
@@ -996,6 +998,16 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   elements.tunerMain.dataset.signal = "active";
   elements.tunerMain.dataset.tuned = String(displayTuned);
 
+  // Colour band shared by the bubble and the centre-to-bubble fill: green in
+  // tune, amber within nearTuneCents, orange beyond. The fill geometry is drawn
+  // per frame in animateBubble, so it just reads gaugeBand.
+  gaugeBand = displayTuned || absCents <= CONFIG.inTuneCents
+    ? "is-green"
+    : absCents <= CONFIG.nearTuneCents
+      ? "is-amber"
+      : "is-orange";
+  elements.gaugeBubble.setAttribute("class", `gauge-bubble signal-dependent ${gaugeBand}`);
+
   // Wordless guidance: ∧ = raise, ∨ = lower, ✓ = in tune. The dial, colors
   // and needle carry the state; the symbol answers "what do I do".
   const direction = displayTuned ? "tuned" : smoothedCents < 0 ? "flat" : "sharp";
@@ -1482,6 +1494,7 @@ function resetDisplay() {
   bubbleTargetPosition = null;
   bubblePosition = null;
   elements.gaugeBubble.setAttribute("hidden", "");
+  elements.gaugeFill.setAttribute("hidden", "");
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "音程未検出");
   elements.tunerMain.dataset.signal = "empty";
@@ -1564,11 +1577,11 @@ function initializeGauge() {
   }
 
   // ♭/♯ anchors tell which side is which without a single word.
-  for (const [sign, symbol] of [[-1, "♭"], [1, "♯"]]) {
+  for (const [sign, symbol, side] of [[-1, "♭", "flat"], [1, "♯", "sharp"]]) {
     const label = document.createElementNS(SVG_NAMESPACE, "text");
     label.setAttribute("x", String(GAUGE.centerX + sign * GAUGE.halfSpanX));
     label.setAttribute("y", String(GAUGE.laneY + 28));
-    label.setAttribute("class", "gauge-end-label");
+    label.setAttribute("class", `gauge-end-label gauge-end-${side}`);
     label.textContent = symbol;
     fragment.append(label);
   }
@@ -1598,6 +1611,7 @@ function animateBubble(now) {
     if (bubblePosition !== null) {
       bubblePosition = null;
       elements.gaugeBubble.setAttribute("hidden", "");
+      elements.gaugeFill.setAttribute("hidden", "");
     }
     bubbleAnimatedAt = now;
     return;
@@ -1621,9 +1635,19 @@ function animateBubble(now) {
     const maxStep = CONFIG.bubbleMaxSpeedPerSec * deltaSeconds;
     bubblePosition += clamp(eased, -maxStep, maxStep);
   }
-  const x = (GAUGE.centerX + bubblePosition * GAUGE.halfSpanX).toFixed(1);
-  elements.gaugeBubble.setAttribute("transform", `translate(${x} ${GAUGE.laneY})`);
+  const x = GAUGE.centerX + bubblePosition * GAUGE.halfSpanX;
+  const xText = x.toFixed(1);
+  elements.gaugeBubble.setAttribute("transform", `translate(${xText} ${GAUGE.laneY})`);
   elements.gaugeBubble.removeAttribute("hidden");
+
+  // Fill the lane from the centre out to the bubble so distance and direction
+  // read at a glance; its colour follows the same band as the bubble.
+  elements.gaugeFill.setAttribute("x1", String(GAUGE.centerX));
+  elements.gaugeFill.setAttribute("x2", xText);
+  elements.gaugeFill.setAttribute("y1", String(GAUGE.laneY));
+  elements.gaugeFill.setAttribute("y2", String(GAUGE.laneY));
+  elements.gaugeFill.setAttribute("class", `gauge-fill ${gaugeBand}`);
+  elements.gaugeFill.removeAttribute("hidden");
 }
 
 function renderGaugeValue(cents) {
@@ -1641,6 +1665,7 @@ function renderNoTargetDisplay() {
   bubbleTargetPosition = null;
   bubblePosition = null;
   elements.gaugeBubble.setAttribute("hidden", "");
+  elements.gaugeFill.setAttribute("hidden", "");
   hideTuneHints();
   elements.pitchMeter.setAttribute("aria-valuenow", "0");
   elements.pitchMeter.setAttribute("aria-valuetext", "該当する弦なし");
