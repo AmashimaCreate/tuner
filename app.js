@@ -16,8 +16,11 @@ const CONFIG = {
   // ~130 ms, and the player's own captures show no false locks at 0.6.
   clarityAcquireMin: 0.6,
   clarityTrackMin: 0.5,
-  rmsAcquireMin: 0.0002,
-  rmsTrackMin: 0.0001,
+  // Kept low because a device noise gate can squeeze a still-ringing string to
+  // near-digital silence (measured floor 0.00002 on the user's G capture); the
+  // clarity gates are what reject actual noise, these floors only bound it.
+  rmsAcquireMin: 0.0001,
+  rmsTrackMin: 0.00004,
   acquireMinMs: 30,
   acquireMinSamples: 2,
   acquireStabilityCents: 45,
@@ -168,6 +171,13 @@ const CONFIG = {
   // octave change and must still reach the tracker so it can switch, so stop
   // folding once this many in a row have been folded.
   octaveFoldMaxRun: 2,
+  // The fold also applies for a short while AFTER tracking ends. The player
+  // tunes one string continuously, and a device noise gate can chop the note
+  // into separate episodes; on re-acquisition a subharmonic reading (a worn G
+  // at ~96 Hz) would otherwise acquire directly as E2/A2 — the spectral test
+  // cannot reject it (measured 0.44-0.75 on this user's G). The maxRun guard
+  // still lets a genuinely sustained octave-different note through.
+  octaveFoldRecentMs: 5000,
   // Hysteresis for auto string selection: another target must be this much
   // closer before the peg moves. It only needs to beat measurement jitter
   // (±10 cents); adjacent strings are 400+ cents apart, and the measured
@@ -348,6 +358,7 @@ let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
 let lastStableHz = null;
+let lastStableAt = -Infinity;
 let lastMeasuredRms = Number.NaN;
 let lastPitchCorrection = "—";
 let currentTuning = TUNINGS.find((tuning) => tuning.id === "standard");
@@ -657,6 +668,21 @@ async function startMicrophoneFromGesture() {
     };
     inputTrack?.addEventListener("ended", trackEndedHandler, { once: true });
 
+    // Some browsers/OSes silently keep noise suppression on despite the
+    // getUserMedia constraints, and its gate chops a decaying string's tail to
+    // digital silence (measured: the G capture floor was 0.00002 ≈ digital
+    // zero). Ask again on the live track; the debug panel's EC/NS/AGC row
+    // shows what actually applied.
+    if (inputTrack?.applyConstraints) {
+      void inputTrack
+        .applyConstraints({
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        })
+        .catch(() => {});
+    }
+
     resetChime();
     resetDetectionData();
     resetDisplay();
@@ -873,7 +899,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // subharmonic, so run it on the raw value instead of only on the output.
   let trackedHz = Number.NaN;
   if (signalUsable) {
-    trackedHz = foldOctaveToTracked(octaveCorrectHz(rawHz));
+    trackedHz = foldOctaveToTracked(octaveCorrectHz(rawHz), now);
   } else {
     octaveFoldRun = 0;
   }
@@ -896,6 +922,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     displayHoldUntil = null;
     pushJitterSample(stableHzHistory, now, stableHz);
     lastStableHz = stableHz;
+    lastStableAt = now;
     lastPitchCorrection = octaveCorrected ? "×2↑" : folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
@@ -1685,7 +1712,11 @@ function clearPitchHistory({ clearStableValue }) {
   smoothedCents = null;
   lastDisplayAt = null;
   displayTuned = false;
-  if (clearStableValue) lastStableHz = null;
+  if (clearStableValue) {
+    lastStableHz = null;
+    lastStableAt = -Infinity;
+    octaveFoldRun = 0;
+  }
 }
 
 function initializeGauge() {
@@ -2227,17 +2258,23 @@ function harmonicMagnitude(hz) {
 // octaveCorrectHz cannot help when the string really does radiate at f/2 (a
 // buzzing G string), but continuity can: a genuine octave change is re-plucked,
 // which releases the note first, so this only ever folds a misdetection.
-function foldOctaveToTracked(hz) {
+function foldOctaveToTracked(hz, now) {
   // RELEASE counts too: a decaying note is still the note being tracked, and
   // that is exactly when a stray subharmonic would otherwise end it early.
+  // After the note ends, keep folding against the recently tracked pitch for
+  // octaveFoldRecentMs — a device noise gate chops one continuous string into
+  // separate episodes, and re-acquiring on a subharmonic must not relabel it.
   const tracked = lastStableHz;
+  const activelyTracked =
+    pitchTracker.state === PITCH_TRACKER_STATES.TRACKING ||
+    pitchTracker.state === PITCH_TRACKER_STATES.RELEASE;
+  const recentlyTracked = now - lastStableAt <= CONFIG.octaveFoldRecentMs;
   if (
     !Number.isFinite(hz) ||
     hz <= 0 ||
     !Number.isFinite(tracked) ||
     tracked <= 0 ||
-    (pitchTracker.state !== PITCH_TRACKER_STATES.TRACKING &&
-      pitchTracker.state !== PITCH_TRACKER_STATES.RELEASE)
+    (!activelyTracked && !recentlyTracked)
   ) {
     octaveFoldRun = 0;
     return hz;

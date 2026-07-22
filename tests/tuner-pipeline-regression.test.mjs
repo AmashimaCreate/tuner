@@ -20,8 +20,8 @@ import {
 const APP_CONFIG = {
   clarityAcquireMin: 0.6,
   clarityTrackMin: 0.5,
-  rmsAcquireMin: 0.0002,
-  rmsTrackMin: 0.0001,
+  rmsAcquireMin: 0.0001,
+  rmsTrackMin: 0.00004,
   acquireMinMs: 30,
   acquireMinSamples: 2,
   acquireStabilityCents: 45,
