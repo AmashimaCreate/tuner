@@ -54,6 +54,21 @@ const CONFIG = {
   // peg fast right at the attack), commit anyway after this long so the needle
   // can never stay blank — a transient is always gone well before this.
   displaySettleMaxMs: 350,
+  // Decay-glide damping. A plucked string genuinely falls as it fades — measured
+  // -15..-17c on this user's low E, tracking the RMS decay exactly — so a string
+  // tuned to 0 slowly reads flat while it rings, which looks like drift. While
+  // the note is decaying, absorb that slow downward drift. A real peg turn moves
+  // faster than sustainHoldMaxRateCents/s, and anything past sustainHoldMaxCents
+  // is a genuine detune, so both still follow exactly (no offset left behind).
+  // The glide is proportional to how far the note has decayed: measured on this
+  // user's low E, -11.5 dB of level cost -15.2c, and -10.5 dB cost -20c, i.e.
+  // ~1.3-1.9 c/dB. So compensate that amplitude-linked component rather than
+  // blocking downward movement — blocking direction stops a sharp string from
+  // ever converging down to 0. A real peg turn changes pitch without a matching
+  // level drop, so it passes through untouched.
+  glideCentsPerDb: 1.5,
+  glideMaxCompensationCents: 25,
+  glideRmsSmoothing: 0.08,
   // Display smoothing (One-Euro): the cutoff rises with the sustained rate of
   // change, so a held note is smoothed hard (steady) while a peg turn passes
   // through almost instantly. beta sets how far motion opens the cutoff.
@@ -318,6 +333,8 @@ let lastDisplayAt = null;
 let displayConfirmed = false;
 let onsetSamples = [];
 let onsetStart = null;
+let sustainRmsPeak = 0;
+let sustainRmsSmoothed = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -1006,6 +1023,18 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     displayConfirmed = false;
     onsetSamples = [];
     onsetStart = now;
+    sustainRmsPeak = 0;
+    sustainRmsSmoothed = null;
+  }
+  // Smooth the level before using it for glide compensation: raw frame-to-frame
+  // RMS is noisy, and feeding that straight in injects that noise into the
+  // displayed cents (measured: it added ~1.2c of jitter on G3).
+  if (Number.isFinite(lastMeasuredRms)) {
+    sustainRmsSmoothed =
+      sustainRmsSmoothed === null
+        ? lastMeasuredRms
+        : sustainRmsSmoothed + (lastMeasuredRms - sustainRmsSmoothed) * CONFIG.glideRmsSmoothing;
+    if (sustainRmsSmoothed > sustainRmsPeak) sustainRmsPeak = sustainRmsSmoothed;
   }
   previousMidi = midi;
   lastDisplayAt = now;
@@ -1033,7 +1062,8 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       return;
     }
   } else {
-    smoothedCents = filterCents(measuredCents, now);
+    const filtered = filterCents(measuredCents, now);
+    smoothedCents = holdThroughDecay(filtered);
   }
 
   const gaugeCents = clamp(
@@ -1101,6 +1131,25 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   }
 
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
+}
+
+// Absorb the downward pitch drift a string makes as it decays, so a string
+// tuned to 0 does not slowly read flat while it rings. Only slow, downward
+// movement on a fading note is held: a peg turn is faster than
+// sustainHoldMaxRateCents/s and a genuine detune exceeds sustainHoldMaxCents,
+// and both re-anchor so no offset is left behind.
+function holdThroughDecay(cents) {
+  if (!Number.isFinite(sustainRmsSmoothed) || sustainRmsSmoothed <= 0) return cents;
+  if (sustainRmsPeak <= 0) return cents;
+  // How far the note has faded from its loudest point, in dB (<= 0).
+  const decayDb = 20 * Math.log10(sustainRmsSmoothed / sustainRmsPeak);
+  if (decayDb >= 0) return cents;
+  const compensation = clamp(
+    -CONFIG.glideCentsPerDb * decayDb,
+    0,
+    CONFIG.glideMaxCompensationCents,
+  );
+  return cents + compensation;
 }
 
 // Shown while a fresh note is still settling: the note letter is known, but the
