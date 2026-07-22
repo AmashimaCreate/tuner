@@ -345,6 +345,7 @@ let onsetSamples = [];
 let onsetStart = null;
 let sustainRmsPeak = 0;
 let sustainRmsSmoothed = null;
+let sustainAnchorCents = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -1052,6 +1053,7 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     onsetStart = now;
     sustainRmsPeak = 0;
     sustainRmsSmoothed = null;
+    sustainAnchorCents = null;
   }
   // Smooth the level before using it for glide compensation: raw frame-to-frame
   // RMS is noisy, and feeding that straight in injects that noise into the
@@ -1166,17 +1168,29 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
 // sustainHoldMaxRateCents/s and a genuine detune exceeds sustainHoldMaxCents,
 // and both re-anchor so no offset is left behind.
 function holdThroughDecay(cents) {
+  // Ceiling of the uncompensated reading this sustain — the pitch the note
+  // started at, tracked upward so a peg turn up re-anchors.
+  sustainAnchorCents = sustainAnchorCents === null
+    ? cents
+    : Math.max(sustainAnchorCents, cents);
   if (!Number.isFinite(sustainRmsSmoothed) || sustainRmsSmoothed <= 0) return cents;
   if (sustainRmsPeak <= 0) return cents;
   // How far the note has faded from its loudest point, in dB (<= 0).
   const decayDb = 20 * Math.log10(sustainRmsSmoothed / sustainRmsPeak);
   if (decayDb >= 0) return cents;
-  const compensation = clamp(
+  const model = clamp(
     -CONFIG.glideCentsPerDb * decayDb,
     0,
     CONFIG.glideMaxCompensationCents,
   );
-  return cents + compensation;
+  // Never compensate more than the pitch has actually fallen this sustain. A
+  // device noise gate collapses the level with NO real glide (measured: level
+  // -40 dB in 0.8 s while the raw pitch sat at 192.0-192.2 Hz); the dB model
+  // alone then pushed the reading +21c sharp and it dived back on the next
+  // pluck. Bounded by the observed drop, a gated-but-steady note gets ~0
+  // compensation while a genuinely gliding low E still gets the full hold.
+  const observedDrop = Math.max(0, sustainAnchorCents - cents);
+  return cents + Math.min(model, observedDrop);
 }
 
 // Shown while a fresh note is still settling: the note letter is known, but the
