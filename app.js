@@ -141,6 +141,18 @@ const CONFIG = {
   // a real low note (whose double is not a string) is never pushed up.
   octaveHarmonicRatioMax: 0.4,
   octaveTargetSnapCents: 60,
+  // Continuity octave fold. Some strings (a worn or buzzing G especially)
+  // genuinely radiate at half their pitch, so the spectral test above cannot
+  // reject it — measured odd/even ratio 0.44-0.75, i.e. it looks like a real
+  // low note. But while a note is already being tracked, a reading landing on
+  // almost exactly half (or double) the tracked pitch is an octave
+  // misdetection, not the player jumping an octave mid-sustain: a real octave
+  // change is re-plucked, which releases the note first. Fold it back.
+  octaveFoldToleranceCents: 40,
+  // ...but only for an isolated blip. A sustained octave reading is a real
+  // octave change and must still reach the tracker so it can switch, so stop
+  // folding once this many in a row have been folded.
+  octaveFoldMaxRun: 2,
   // Hysteresis for auto string selection: another target must be this much
   // closer before the peg moves. It only needs to beat measurement jitter
   // (±10 cents); adjacent strings are 400+ cents apart, and the measured
@@ -314,6 +326,7 @@ let bubbleTargetPosition = null;
 let bubblePosition = null;
 let bubbleAnimatedAt = null;
 let gaugeBand = "is-green";
+let octaveFoldRun = 0;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
@@ -835,15 +848,29 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
 
   if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
 
+  // Fix an octave-down (subharmonic) misdetection BEFORE the tracker sees it.
+  // A plucked G string intermittently reads at exactly half its pitch (~97.7 Hz
+  // for G3); feeding that to the tracker threw it into switch-pending and drove
+  // release episodes and dropouts, which is why G was the least stable string.
+  // The odd/even harmonic check already separates a real low note from a
+  // subharmonic, so run it on the raw value instead of only on the output.
+  let trackedHz = Number.NaN;
+  if (signalUsable) {
+    trackedHz = foldOctaveToTracked(octaveCorrectHz(rawHz));
+  } else {
+    octaveFoldRun = 0;
+  }
+  const octaveCorrected = signalUsable && trackedHz !== rawHz;
+
   const result = pitchTracker.update({
-    hz: signalUsable ? rawHz : Number.NaN,
+    hz: trackedHz,
     clarity: signalUsable ? clarity : Number.NaN,
     nowMs: now,
   });
   syncTrackerState(result);
 
   if (result.accepted && Number.isFinite(result.valueHz)) {
-    const stableHz = octaveCorrectHz(result.valueHz);
+    const stableHz = result.valueHz;
     const reselectString = result.event === "acquired" || result.event === "switched";
     // A fresh acquisition after silence is a new note: the sticky bias that
     // protects a bent note mid-tracking must not carry over from before the
@@ -852,7 +879,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     displayHoldUntil = null;
     pushJitterSample(stableHzHistory, now, stableHz);
     lastStableHz = stableHz;
-    lastPitchCorrection = folded ? "½↓" : "×1";
+    lastPitchCorrection = octaveCorrected ? "×2↑" : folded ? "½↓" : "×1";
     // Select only when the tracker confirms a new cluster. A bend or drift in
     // one sustained note must not silently move the UI to another string.
     updateDisplay(stableHz, now, { reselectString, refinedHz });
@@ -2146,6 +2173,43 @@ function harmonicMagnitude(hz) {
 // the true fundamental, using the long buffer's harmonic structure. Only fires
 // when the odd harmonics are weak AND twice the reading lands on a target
 // string, so a genuine low note is never pushed up. See octaveHarmonicRatioMax.
+// While a note is actively tracked, snap a reading that lands on almost exactly
+// half or double the tracked pitch back onto it. The spectral test in
+// octaveCorrectHz cannot help when the string really does radiate at f/2 (a
+// buzzing G string), but continuity can: a genuine octave change is re-plucked,
+// which releases the note first, so this only ever folds a misdetection.
+function foldOctaveToTracked(hz) {
+  // RELEASE counts too: a decaying note is still the note being tracked, and
+  // that is exactly when a stray subharmonic would otherwise end it early.
+  const tracked = lastStableHz;
+  if (
+    !Number.isFinite(hz) ||
+    hz <= 0 ||
+    !Number.isFinite(tracked) ||
+    tracked <= 0 ||
+    (pitchTracker.state !== PITCH_TRACKER_STATES.TRACKING &&
+      pitchTracker.state !== PITCH_TRACKER_STATES.RELEASE)
+  ) {
+    octaveFoldRun = 0;
+    return hz;
+  }
+
+  const tolerance = CONFIG.octaveFoldToleranceCents;
+  let folded = hz;
+  if (Math.abs(centsBetween(hz * 2, tracked)) <= tolerance) folded = hz * 2;
+  else if (Math.abs(centsBetween(hz / 2, tracked)) <= tolerance) folded = hz / 2;
+
+  if (folded === hz) {
+    octaveFoldRun = 0;
+    return hz;
+  }
+  // A sustained run is a real octave change: let it through so the tracker can
+  // go switch-pending and move, instead of masking it forever.
+  if (octaveFoldRun >= CONFIG.octaveFoldMaxRun) return hz;
+  octaveFoldRun += 1;
+  return folded;
+}
+
 function octaveCorrectHz(hz) {
   if (
     !Number.isFinite(hz) ||
