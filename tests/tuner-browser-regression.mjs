@@ -188,11 +188,12 @@ try {
     const fixture = await openFixture({ tuningId: "standard", frequency: e2 });
     await waitForPreset(fixture.page, { peg: 0, note: "E2", cents: 0, hz: e2 });
     await setFrequency(fixture.page, 1000);
+    // A sustained unmatched pitch must clear the stale peg once it has
+    // persisted a few frames (isolated unmatched wisps are discarded instead,
+    // so the clear is no longer same-frame with the switch event).
     await fixture.page.waitForFunction(() => {
       const main = document.querySelector("#tunerMain");
-      const tracker = document.querySelector("#debugTracker")?.textContent ?? "";
       return main?.dataset.trackerState === "tracking" &&
-        tracker.includes("switched") &&
         document.querySelector(".peg.is-active") === null &&
         main.dataset.signal === "empty";
     }, null, { timeout: 4_000 });

@@ -45,7 +45,21 @@ const CONFIG = {
   // on the next few accepted frames, where the tracked value has settled —
   // but no longer, so a subsequent in-note glide stays locked to its string.
   reselectFrames: 3,
-  displayHoldMs: 1500,
+  // Display continuity. Aggressive device noise processing (Bluetooth mics,
+  // Android noise suppression) chops one ringing string into short episodes
+  // with silence between; the reading must survive those gaps looking alive,
+  // the way commercial tuners do. Stay fully lit for displayDimDelayMs after a
+  // release, then dim, then clear at displayHoldMs.
+  displayDimDelayMs: 2500,
+  displayHoldMs: 4500,
+  // A re-pluck of the note already on screen relocks instantly when the new
+  // reading lands within this of the held value (a pluck attack starts up to
+  // ~15c sharp; garbage transients are hundreds of cents off).
+  reAcquireSnapCents: 35,
+  // An unmatched pitch only clears the held reading once it persists this many
+  // near-consecutive frames: a genuine unmatchable note is continuous, while a
+  // noise-gate wisp is one or two isolated frames that must be discarded.
+  unmatchedClearFrames: 4,
   // Onset-settle gate: at a fresh pluck the attack transient can be detected
   // wildly off (a hard B3 momentarily reads ~280 Hz => +221c). Show the note
   // letter but hold the needle blank until the pitch has stayed within
@@ -376,6 +390,9 @@ let inTuneSince = null;
 let lastChimeAt = -Infinity;
 let analysisBlankedUntil = -Infinity;
 let displayHoldUntil = null;
+let displayDimAt = null;
+let unmatchedRun = 0;
+let lastUnmatchedAt = -Infinity;
 let reselectFramesLeft = 0;
 const activeChimeVoices = new Set();
 let activeChimeMaster = null;
@@ -934,6 +951,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     // release, or a detuned string could keep the previous peg lit.
     if (result.event === "acquired") autoString = -1;
     displayHoldUntil = null;
+    displayDimAt = null;
     pushJitterSample(stableHzHistory, now, stableHz);
     lastStableHz = stableHz;
     lastStableAt = now;
@@ -942,12 +960,14 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     // one sustained note must not silently move the UI to another string.
     updateDisplay(stableHz, now, { reselectString, refinedHz });
   } else if (result.event === "released") {
-    // Keep the last reading visible but dimmed for a short while: a plucked
-    // string fading out should not blank the tuner the player is reading.
+    // Keep the last reading visible: a plucked string fading out (or being
+    // chopped off by device noise processing) should not blank the tuner the
+    // player is reading. Stay fully lit for a while first — dimming right away
+    // read as the tuner dying between plucks — then dim, then clear.
     chimeArmed = true;
     inTuneSince = null;
     displayHoldUntil = now + CONFIG.displayHoldMs;
-    dimDisplay();
+    displayDimAt = now + CONFIG.displayDimDelayMs;
   } else if (result.state === PITCH_TRACKER_STATES.RELEASE) {
     // Transient release episodes (clarity dipping for a few frames) keep the
     // display fully lit; dimming only starts once the note actually ends.
@@ -956,6 +976,12 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   } else if (result.event === "switch-pending") {
     // Hold the last trustworthy value while a new, distant cluster is checked.
     inTuneSince = null;
+  }
+
+  // The deferred dim from a released note.
+  if (displayDimAt !== null && now >= displayDimAt) {
+    displayDimAt = null;
+    dimDisplay();
   }
 
   // CANDIDATE counts as expired too: noisy input can bounce between IDLE and
@@ -1028,6 +1054,28 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   } else {
     if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
+
+    // Invalid-sample guard: a pitch that matches NO string (a gate wisp at
+    // e.g. 509 Hz) is not a note the player can be tuning. Blanking the held
+    // reading for it made the tuner look dead between plucks — discard the
+    // sample and keep what is on screen instead, like commercial tuners do.
+    // A genuinely unmatchable NOTE is continuous, so once the unmatched pitch
+    // persists a few near-consecutive frames it falls through and clears.
+    if (
+      manualString === null &&
+      smoothedCents !== null &&
+      nearestStringIndex(stableHz, targetsHz, CONFIG.stringMatchMaxCents) < 0
+    ) {
+      unmatchedRun = now - lastUnmatchedAt <= 300 ? unmatchedRun + 1 : 1;
+      lastUnmatchedAt = now;
+      if (unmatchedRun < CONFIG.unmatchedClearFrames) {
+        updateDebugPanel({ stableHz, midi: Number.NaN, cents: Number.NaN });
+        return;
+      }
+    } else {
+      unmatchedRun = 0;
+    }
+
     if (manualString === null && reselectFramesLeft > 0) {
       reselectFramesLeft -= 1;
       if (updateAutoString(stableHz)) renderHeadstock();
@@ -1060,13 +1108,25 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   // attack transient never gathers a settled window, so it is neither shown nor
   // latched — the needle simply appears already on the right value.
   if (reselectString || midi !== previousMidi) {
+    // Instant relock: a re-pluck of the note already on screen, reading close
+    // to the held value, needs no settle window — a device noise gate chops a
+    // ringing string into episodes every second or two, and blanking the
+    // needle on each one made the tuner look dead half the time. Garbage
+    // transients sit hundreds of cents off, so proximity is a safe test.
+    const instantRelock =
+      midi === previousMidi &&
+      smoothedCents !== null &&
+      Math.abs(measuredCents - smoothedCents) <= CONFIG.reAcquireSnapCents;
     resetCentsFilter();
-    displayConfirmed = false;
+    displayConfirmed = instantRelock;
     onsetSamples = [];
     onsetStart = now;
     sustainRmsPeak = 0;
     sustainRmsSmoothed = null;
     sustainAnchorCents = null;
+    // Seed the filter at the held value so the needle continues from where it
+    // was instead of jumping to the raw attack reading.
+    if (instantRelock) filterCents(smoothedCents, now);
   }
   // Smooth the level before using it for glide compensation: raw frame-to-frame
   // RMS is noisy, and feeding that straight in injects that noise into the
@@ -1712,6 +1772,7 @@ function resetDetectionData() {
   autoString = -1;
   inTuneSince = null;
   displayHoldUntil = null;
+  displayDimAt = null;
   reselectFramesLeft = 0;
   lastRefinedHz = Number.NaN;
   lastRefinedAt = -Infinity;
