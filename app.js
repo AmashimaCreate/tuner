@@ -186,6 +186,14 @@ const CONFIG = {
   // octave change and must still reach the tracker so it can switch, so stop
   // folding once this many in a row have been folded.
   octaveFoldMaxRun: 2,
+  // The ×3 family gets a longer run near a pluck onset: a hard B attack can
+  // read its third subharmonic (= exactly the open E2) for several frames,
+  // and 2 frames of protection let it switch to E. A genuine E played right
+  // after B sustains far past this and still switches, just ~0.2s later.
+  octaveTripleFoldMaxRun: 8,
+  // No note may begin without an attack: acquisition requires an RMS onset
+  // within this window. (Switching between notes while tracking is exempt.)
+  onsetAcquireWindowMs: 700,
   // The fold also applies for a short while AFTER tracking ends. The player
   // tunes one string continuously, and a device noise gate can chop the note
   // into separate episodes; on re-acquisition a subharmonic reading (a worn G
@@ -367,7 +375,7 @@ let bubblePosition = null;
 let bubbleAnimatedAt = null;
 let gaugeBand = "is-green";
 let octaveFoldRun = 0;
-let rmsFastEma = null;
+let rmsFastEma = 0;
 let lastOnsetAt = -Infinity;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
@@ -914,27 +922,40 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     Number.isFinite(rawHz) &&
     rawHz >= CONFIG.minPitchHz &&
     rawHz <= CONFIG.maxPitchHz;
+  // Pluck-onset detector: a real new note arrives with an RMS jump, a decay
+  // artifact does not. The ×3 fold below uses this to tell a genuine E2 pluck
+  // (switch after the usual short run) from a decaying B3 read at its third
+  // subharmonic (fold for as long as the decay lasts), and acquisition below
+  // requires a recent onset so nothing "starts" out of silence.
+  if (Number.isFinite(rms)) {
+    // The 2.5x jump over the fast EMA is the discriminator; the absolute floor
+    // is only the acquisition minimum, so a legitimately faint pluck (a quiet
+    // Android mic delivers ~0.0004 rms) still counts as an onset.
+    if (rms > Math.max(rmsFastEma * 2.5, CONFIG.rmsAcquireMin)) {
+      lastOnsetAt = now;
+    }
+    rmsFastEma = rmsFastEma + (rms - rmsFastEma) * 0.3;
+  }
+
   const trackingExistingPitch =
     pitchTracker.state === PITCH_TRACKER_STATES.TRACKING ||
     pitchTracker.state === PITCH_TRACKER_STATES.RELEASE;
   const rmsMin = trackingExistingPitch ? CONFIG.rmsTrackMin : CONFIG.rmsAcquireMin;
-  const signalUsable = rawInRange && Number.isFinite(rms) && rms >= rmsMin;
+  // No note may BEGIN without an attack. A note fading below audibility (or
+  // steady room hum) keeps producing readings — a barely-vibrating B string's
+  // third subharmonic lands exactly on the open E2 and used to appear out of
+  // silence once the fold's recency window lapsed. A genuine pluck, however
+  // soft, arrives with an RMS jump the onset detector below sees; sustained
+  // signals with no attack must never acquire. Switches from a tracked note
+  // are unaffected.
+  const onsetRecent = now - lastOnsetAt <= CONFIG.onsetAcquireWindowMs;
+  const signalUsable =
+    rawInRange &&
+    Number.isFinite(rms) &&
+    rms >= rmsMin &&
+    (trackingExistingPitch || onsetRecent);
 
   if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
-
-  // Pluck-onset detector: a real new note arrives with an RMS jump, a decay
-  // artifact does not. The ×3 fold below uses this to tell a genuine E2 pluck
-  // (switch after the usual short run) from a decaying B3 read at its third
-  // subharmonic (fold for as long as the decay lasts).
-  if (Number.isFinite(rms)) {
-    if (
-      rmsFastEma !== null &&
-      rms > Math.max(rmsFastEma * 2.5, CONFIG.rmsAcquireMin * 4)
-    ) {
-      lastOnsetAt = now;
-    }
-    rmsFastEma = rmsFastEma === null ? rms : rmsFastEma + (rms - rmsFastEma) * 0.3;
-  }
 
   // Fix an octave-down (subharmonic) misdetection BEFORE the tracker sees it.
   // A plucked G string intermittently reads at exactly half its pitch (~97.7 Hz
@@ -2365,9 +2386,15 @@ function foldOctaveToTracked(hz, now) {
   // tracker can go switch-pending and move, instead of masking it forever.
   // EXCEPT the ×3 family with no recent pluck onset: a genuine note change is
   // always re-plucked (RMS jump), while a decaying string can sit on its third
-  // subharmonic indefinitely — and B3/3 lands exactly on the open E2.
+  // subharmonic indefinitely — and B3/3 lands exactly on the open E2. Near an
+  // onset the ×3 family still gets a longer run than the octave: a hard B
+  // attack reads its subharmonic for several frames, and a real E pluck
+  // sustains far past the allowance and still switches.
   const decayOnly = now - lastOnsetAt > 400;
-  if (octaveFoldRun >= CONFIG.octaveFoldMaxRun && !(tripleFold && decayOnly)) {
+  const runLimit = tripleFold
+    ? decayOnly ? Infinity : CONFIG.octaveTripleFoldMaxRun
+    : CONFIG.octaveFoldMaxRun;
+  if (octaveFoldRun >= runLimit) {
     return hz;
   }
   octaveFoldRun += 1;
