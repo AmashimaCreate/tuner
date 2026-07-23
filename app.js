@@ -91,6 +91,11 @@ const CONFIG = {
   // test, so its flaky readings cannot unfreeze anything.
   sustainUnfreezeCents: 8,
   sustainUnfreezeMinRms: 0.002,
+  // In deep decay the display still follows the honest measurement, but with
+  // this very slow time constant — the needle stays alive on every string
+  // (a hard freeze deadened them under the noise gate) while the real
+  // end-of-sustain pitch fall moves it only a couple of cents.
+  sustainSlowFollowTauMs: 2500,
   glideRmsSmoothing: 0.08,
   // Display smoothing (One-Euro): the cutoff rises with the sustained rate of
   // change, so a held note is smoothed hard (steady) while a peg turn passes
@@ -1159,6 +1164,7 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     if (sustainRmsSmoothed > sustainRmsPeak) sustainRmsPeak = sustainRmsSmoothed;
   }
   previousMidi = midi;
+  const previousDisplayAt = lastDisplayAt;
   lastDisplayAt = now;
 
   if (!displayConfirmed) {
@@ -1192,10 +1198,19 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       sustainRmsSmoothed >= CONFIG.sustainUnfreezeMinRms
     ) {
       // The player is turning the peg on a still-strong note: rebase the
-      // episode's level peak so the freeze releases and the needle follows.
+      // episode's level peak so the needle returns to full speed.
       sustainRmsPeak = sustainRmsSmoothed;
     }
-    if (!sustainFrozen()) {
+    if (sustainFrozen()) {
+      // Deep decay: keep FOLLOWING the honest measurement, just very slowly.
+      // A hard freeze here deadened the needle on every string (the noise
+      // gate puts each pluck into deep decay within ~0.5 s), while full speed
+      // would chase the real end-of-sustain pitch fall. Slow following keeps
+      // the value truthful and the needle alive without visible drift.
+      const deltaSec = clamp((now - (previousDisplayAt ?? now)) / 1000, 0, 0.1);
+      const alpha = Math.min(1, deltaSec / (CONFIG.sustainSlowFollowTauMs / 1000));
+      smoothedCents += (measuredCents - smoothedCents) * alpha;
+    } else {
       smoothedCents = filterCents(measuredCents, now);
     }
   }
