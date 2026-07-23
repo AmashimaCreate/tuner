@@ -71,32 +71,15 @@ const CONFIG = {
   // peg fast right at the attack), commit anyway after this long so the needle
   // can never stay blank — a transient is always gone well before this.
   displaySettleMaxMs: 350,
-  // Deep-decay freeze. A plucked string genuinely falls in pitch as it fades
-  // (~1.3-1.9 c/dB on this user's low E), and a deeply decayed signal is also
-  // where readings get unreliable. Earlier designs tried to COMPENSATE that
-  // drift from the level (add cents back proportional to dB of decay) — the
-  // self-audit confirmed that fabricating an offset can absorb a real peg turn
-  // and pin the display at the attack-sharp value, letting the chime confirm a
-  // string that is 10-25c off. So no arithmetic on the reading: once the note
-  // has faded sustainFreezeDb below its peak, simply STOP UPDATING and hold the
-  // last reliable value (and don't newly declare "in tune" from a frozen
-  // reading). A re-pluck or note change unfreezes immediately.
-  sustainFreezeDb: 8,
-  // ...but a freeze must never block the player: on a long-ringing string
-  // (the low E especially) the peg is often turned deep into the sustain.
-  // If the measured pitch moves clearly away from the frozen value while the
-  // signal is still absolutely strong, the player is turning — release the
-  // freeze and follow. The residual glide after the freeze point is only a
-  // few cents, so it never trips this, and a gated/weak tail fails the level
-  // test, so its flaky readings cannot unfreeze anything.
-  sustainUnfreezeCents: 8,
-  sustainUnfreezeMinRms: 0.002,
-  // In deep decay the display still follows the honest measurement, but with
-  // this very slow time constant — the needle stays alive on every string
-  // (a hard freeze deadened them under the noise gate) while the real
-  // end-of-sustain pitch fall moves it only a couple of cents.
-  sustainSlowFollowTauMs: 2500,
-  glideRmsSmoothing: 0.08,
+  // NOTE on decay handling: there is deliberately NONE. A plucked string
+  // genuinely falls a few cents as it fades; three designs tried to hide that
+  // (dB-proportional compensation, a deep-decay freeze, then slow-follow) and
+  // each one damaged something more important — the compensation could absorb
+  // a real peg turn and let the chime confirm a mistuned string, the freeze
+  // and slow-follow deadened the needle on every string under device noise
+  // gates. The One-Euro filter below already IS the intended trade-off:
+  // heavy smoothing at rest, instant follow on real movement. Do not add
+  // level-driven display logic on top of it again.
   // Display smoothing (One-Euro): the cutoff rises with the sustained rate of
   // change, so a held note is smoothed hard (steady) while a peg turn passes
   // through almost instantly. beta sets how far motion opens the cutoff.
@@ -368,8 +351,6 @@ let lastDisplayAt = null;
 let displayConfirmed = false;
 let onsetSamples = [];
 let onsetStart = null;
-let sustainRmsPeak = 0;
-let sustainRmsSmoothed = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -1147,24 +1128,11 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     displayConfirmed = instantRelock;
     onsetSamples = [];
     onsetStart = now;
-    sustainRmsPeak = 0;
-    sustainRmsSmoothed = null;
     // Seed the filter at the held value so the needle continues from where it
     // was instead of jumping to the raw attack reading.
     if (instantRelock) filterCents(smoothedCents, now);
   }
-  // Smooth the level before using it for glide compensation: raw frame-to-frame
-  // RMS is noisy, and feeding that straight in injects that noise into the
-  // displayed cents (measured: it added ~1.2c of jitter on G3).
-  if (Number.isFinite(lastMeasuredRms)) {
-    sustainRmsSmoothed =
-      sustainRmsSmoothed === null
-        ? lastMeasuredRms
-        : sustainRmsSmoothed + (lastMeasuredRms - sustainRmsSmoothed) * CONFIG.glideRmsSmoothing;
-    if (sustainRmsSmoothed > sustainRmsPeak) sustainRmsPeak = sustainRmsSmoothed;
-  }
   previousMidi = midi;
-  const previousDisplayAt = lastDisplayAt;
   lastDisplayAt = now;
 
   if (!displayConfirmed) {
@@ -1190,31 +1158,8 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       return;
     }
   } else {
-    if (
-      sustainFrozen() &&
-      smoothedCents !== null &&
-      Math.abs(measuredCents - smoothedCents) > CONFIG.sustainUnfreezeCents &&
-      Number.isFinite(sustainRmsSmoothed) &&
-      sustainRmsSmoothed >= CONFIG.sustainUnfreezeMinRms
-    ) {
-      // The player is turning the peg on a still-strong note: rebase the
-      // episode's level peak so the needle returns to full speed.
-      sustainRmsPeak = sustainRmsSmoothed;
-    }
-    if (sustainFrozen()) {
-      // Deep decay: keep FOLLOWING the honest measurement, just very slowly.
-      // A hard freeze here deadened the needle on every string (the noise
-      // gate puts each pluck into deep decay within ~0.5 s), while full speed
-      // would chase the real end-of-sustain pitch fall. Slow following keeps
-      // the value truthful and the needle alive without visible drift.
-      const deltaSec = clamp((now - (previousDisplayAt ?? now)) / 1000, 0, 0.1);
-      const alpha = Math.min(1, deltaSec / (CONFIG.sustainSlowFollowTauMs / 1000));
-      smoothedCents += (measuredCents - smoothedCents) * alpha;
-    } else {
-      smoothedCents = filterCents(measuredCents, now);
-    }
+    smoothedCents = filterCents(measuredCents, now);
   }
-  const frozen = displayConfirmed && sustainFrozen();
 
   const gaugeCents = clamp(
     smoothedCents,
@@ -1232,16 +1177,15 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   const centsText = formatCents(displayedCentsInt);
 
   // Separate enter/leave thresholds so jitter at the boundary cannot strobe
-  // the green state on and off. A frozen (deeply decayed) reading may keep an
-  // already-green state but must not newly declare "in tune".
+  // the green state on and off.
   const absCents = Math.abs(smoothedCents);
   if (displayTuned) {
     if (absCents > CONFIG.tunedExitCents) displayTuned = false;
-  } else if (absCents <= CONFIG.tunedEnterCents && !frozen) {
+  } else if (absCents <= CONFIG.tunedEnterCents) {
     displayTuned = true;
   }
 
-  if (!frozen) updateChime(smoothedCents, now);
+  updateChime(smoothedCents, now);
 
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
@@ -1282,19 +1226,6 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   }
 
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
-}
-
-// True once the sustaining note has faded sustainFreezeDb below its peak: from
-// there the reading is no longer representative (real strings glide flat as
-// they fade, gated mics mangle the tail), so the display holds the last
-// reliable value instead of chasing it. No arithmetic is applied to the
-// reading — the earlier dB-proportional compensation could absorb a real peg
-// turn and let the chime confirm a mistuned string.
-function sustainFrozen() {
-  if (!Number.isFinite(sustainRmsSmoothed) || sustainRmsSmoothed <= 0) return false;
-  if (sustainRmsPeak <= 0) return false;
-  const decayDb = 20 * Math.log10(sustainRmsSmoothed / sustainRmsPeak);
-  return decayDb <= -CONFIG.sustainFreezeDb;
 }
 
 // Shown while a fresh note is still settling: the note letter is known, but the
