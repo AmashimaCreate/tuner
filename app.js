@@ -50,8 +50,8 @@ const CONFIG = {
   // with silence between; the reading must survive those gaps looking alive,
   // the way commercial tuners do. Stay fully lit for displayDimDelayMs after a
   // release, then dim, then clear at displayHoldMs.
-  displayDimDelayMs: 2500,
-  displayHoldMs: 4500,
+  displayDimDelayMs: 3000,
+  displayHoldMs: 8000,
   // A re-pluck of the note already on screen relocks instantly when the new
   // reading lands within this of the held value (a pluck attack starts up to
   // ~15c sharp; garbage transients are hundreds of cents off).
@@ -369,6 +369,8 @@ let bubblePosition = null;
 let bubbleAnimatedAt = null;
 let gaugeBand = "is-green";
 let octaveFoldRun = 0;
+let rmsFastEma = null;
+let lastOnsetAt = -Infinity;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
@@ -921,6 +923,20 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   const signalUsable = rawInRange && Number.isFinite(rms) && rms >= rmsMin;
 
   if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
+
+  // Pluck-onset detector: a real new note arrives with an RMS jump, a decay
+  // artifact does not. The ×3 fold below uses this to tell a genuine E2 pluck
+  // (switch after the usual short run) from a decaying B3 read at its third
+  // subharmonic (fold for as long as the decay lasts).
+  if (Number.isFinite(rms)) {
+    if (
+      rmsFastEma !== null &&
+      rms > Math.max(rmsFastEma * 2.5, CONFIG.rmsAcquireMin * 4)
+    ) {
+      lastOnsetAt = now;
+    }
+    rmsFastEma = rmsFastEma === null ? rms : rmsFastEma + (rms - rmsFastEma) * 0.3;
+  }
 
   // Fix an octave-down (subharmonic) misdetection BEFORE the tracker sees it.
   // A plucked G string intermittently reads at exactly half its pitch (~97.7 Hz
@@ -2368,18 +2384,36 @@ function foldOctaveToTracked(hz, now) {
     return hz;
   }
 
+  // The detector's known decay failures land on f/2 AND f/3 (round-1 audit:
+  // "picks 1/2 and 1/3 subharmonics during real decay"). The f/3 case is nasty
+  // in standard tuning because B3/3 = 82.31 Hz ≈ the open E2 (82.41) — a
+  // decaying B read at its third subharmonic displays as E. Same family:
+  // E4/3 = 109.88 ≈ A2. Fold all of ×2, ÷2, ×3, ÷3 onto the tracked pitch;
+  // the max-run guard below still lets a genuinely different note through.
   const tolerance = CONFIG.octaveFoldToleranceCents;
   let folded = hz;
-  if (Math.abs(centsBetween(hz * 2, tracked)) <= tolerance) folded = hz * 2;
-  else if (Math.abs(centsBetween(hz / 2, tracked)) <= tolerance) folded = hz / 2;
+  let tripleFold = false;
+  for (const candidate of [hz * 2, hz / 2, hz * 3, hz / 3]) {
+    if (Math.abs(centsBetween(candidate, tracked)) <= tolerance) {
+      folded = candidate;
+      tripleFold = candidate === hz * 3 || candidate === hz / 3;
+      break;
+    }
+  }
 
   if (folded === hz) {
     octaveFoldRun = 0;
     return hz;
   }
-  // A sustained run is a real octave change: let it through so the tracker can
-  // go switch-pending and move, instead of masking it forever.
-  if (octaveFoldRun >= CONFIG.octaveFoldMaxRun) return hz;
+  // A sustained run is normally a real note change: let it through so the
+  // tracker can go switch-pending and move, instead of masking it forever.
+  // EXCEPT the ×3 family with no recent pluck onset: a genuine note change is
+  // always re-plucked (RMS jump), while a decaying string can sit on its third
+  // subharmonic indefinitely — and B3/3 lands exactly on the open E2.
+  const decayOnly = now - lastOnsetAt > 400;
+  if (octaveFoldRun >= CONFIG.octaveFoldMaxRun && !(tripleFold && decayOnly)) {
+    return hz;
+  }
   octaveFoldRun += 1;
   return folded;
 }

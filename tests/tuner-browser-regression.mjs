@@ -149,16 +149,18 @@ try {
     assert.equal(held.note, "E2", "display hold must keep the last note visible");
 
     // ...and the held reading must clear on its own once displayHoldMs passes.
+    // The reading survives choppy input for several seconds by design (dim at
+    // 3 s, clear at 8 s), so the dim-to-empty stretch is ~5 s.
     await fixture.page.waitForFunction(() => {
       const main = document.querySelector("#tunerMain");
       return main?.dataset.signal === "empty" &&
         document.querySelector(".peg.is-active") === null;
-    }, null, { timeout: 4_000 });
+    }, null, { timeout: 9_000 });
     const displayHoldMs =
       (await fixture.page.evaluate(() => performance.now())) - held.atMs;
     assert.ok(
-      displayHoldMs >= 1_000 && displayHoldMs <= 2_600,
-      `display hold cleared after ${Math.round(displayHoldMs)}ms, expected ~1500ms`,
+      displayHoldMs >= 3_500 && displayHoldMs <= 6_500,
+      `display hold cleared after ${Math.round(displayHoldMs)}ms, expected ~5000ms after dim`,
     );
 
     await setFrequency(fixture.page, a2);
