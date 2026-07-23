@@ -684,6 +684,19 @@ async function startMicrophoneFromGesture() {
         .catch(() => {});
     }
 
+    // A Bluetooth headset microphone runs in hands-free mode: telephone-band
+    // sample rate and the headset's own noise gate, which chops a decaying
+    // string to silence (confirmed on a user capture: "EarFun Tune Pro
+    // (Bluetooth)", 16 kHz, floor at digital zero). Nothing the app requests
+    // can disable that hardware DSP, so say it plainly instead.
+    const inputSettings = inputTrack?.getSettings?.() ?? {};
+    const bluetoothMic =
+      /bluetooth/i.test(inputTrack?.label ?? "") ||
+      (Number.isFinite(inputSettings.sampleRate) && inputSettings.sampleRate <= 24000);
+    if (bluetoothMic) {
+      setInputWarning("Bluetoothマイクは通話品質になります。内蔵マイク推奨");
+    }
+
     resetChime();
     resetDetectionData();
     resetDisplay();
@@ -2398,6 +2411,13 @@ function setButtonActive(active) {
 }
 
 function setError(message) {
+  elements.errorMessage.classList.remove("is-warning");
+  elements.errorMessage.textContent = message;
+}
+
+// Same banner in amber for input-quality notices that are not failures.
+function setInputWarning(message) {
+  elements.errorMessage.classList.add("is-warning");
   elements.errorMessage.textContent = message;
 }
 
