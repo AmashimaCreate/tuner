@@ -146,6 +146,13 @@ const CONFIG = {
   concertAStep: 1,
   chimeGain: 0.045,
   chimeHoldMs: 240,
+  // The chime must not fire while the player is still TURNING through the
+  // in-tune window: firing blanks analysis for chimeBlankingMs (speaker
+  // feedback protection), which measured as a ~450 ms dead needle with a 12c
+  // snap right at the most delicate moment of tuning. Wait until the display
+  // has essentially stopped moving — then the blanking happens while the
+  // player is holding still, where it costs nothing.
+  chimeMaxSpeedCentsPerSec: 6,
   chimeRefractoryMs: 800,
   chimeReleaseCents: 12.5,
   chimeBlankingMs: 500,
@@ -1318,8 +1325,11 @@ function updateChime(cents, now) {
 
   if (inTuneSince === null || now < inTuneSince) inTuneSince = now;
   const heldLongEnough = now - inTuneSince >= CONFIG.chimeHoldMs;
+  // The one-euro filter's own smoothed velocity: near zero once the player has
+  // stopped turning. Firing only then keeps the analysis blanking harmless.
+  const settled = Math.abs(filterPrevSpeed) <= CONFIG.chimeMaxSpeedCentsPerSec;
 
-  if (chimeArmed && refractoryElapsed && heldLongEnough && playInTuneChime(now)) {
+  if (chimeArmed && refractoryElapsed && heldLongEnough && settled && playInTuneChime(now)) {
     lastChimeAt = now;
     chimeArmed = false;
   }
