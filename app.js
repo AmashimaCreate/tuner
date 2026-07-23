@@ -82,6 +82,15 @@ const CONFIG = {
   // last reliable value (and don't newly declare "in tune" from a frozen
   // reading). A re-pluck or note change unfreezes immediately.
   sustainFreezeDb: 8,
+  // ...but a freeze must never block the player: on a long-ringing string
+  // (the low E especially) the peg is often turned deep into the sustain.
+  // If the measured pitch moves clearly away from the frozen value while the
+  // signal is still absolutely strong, the player is turning — release the
+  // freeze and follow. The residual glide after the freeze point is only a
+  // few cents, so it never trips this, and a gated/weak tail fails the level
+  // test, so its flaky readings cannot unfreeze anything.
+  sustainUnfreezeCents: 8,
+  sustainUnfreezeMinRms: 0.002,
   glideRmsSmoothing: 0.08,
   // Display smoothing (One-Euro): the cutoff rises with the sustained rate of
   // change, so a held note is smoothed hard (steady) while a peg turn passes
@@ -1174,8 +1183,21 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       updateDebugPanel({ stableHz, midi, cents: Number.NaN });
       return;
     }
-  } else if (!sustainFrozen()) {
-    smoothedCents = filterCents(measuredCents, now);
+  } else {
+    if (
+      sustainFrozen() &&
+      smoothedCents !== null &&
+      Math.abs(measuredCents - smoothedCents) > CONFIG.sustainUnfreezeCents &&
+      Number.isFinite(sustainRmsSmoothed) &&
+      sustainRmsSmoothed >= CONFIG.sustainUnfreezeMinRms
+    ) {
+      // The player is turning the peg on a still-strong note: rebase the
+      // episode's level peak so the freeze releases and the needle follows.
+      sustainRmsPeak = sustainRmsSmoothed;
+    }
+    if (!sustainFrozen()) {
+      smoothedCents = filterCents(measuredCents, now);
+    }
   }
   const frozen = displayConfirmed && sustainFrozen();
 
