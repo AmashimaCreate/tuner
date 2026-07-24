@@ -733,6 +733,10 @@ async function startMicrophoneFromGesture() {
       setInputWarning("Bluetoothマイクは通話品質になります。内蔵マイク推奨");
     } else if (avoidedBluetoothInput) {
       setInputWarning("Bluetoothマイクを回避し、内蔵マイクで聴いています");
+    } else {
+      // Always name the microphone in use: it answers "which mic did it pick"
+      // at a glance and doubles as a build indicator.
+      setInputNote(`マイク: ${inputTrack?.label || "不明"}`);
     }
 
     resetChime();
@@ -2549,13 +2553,21 @@ function setButtonActive(active) {
 }
 
 function setError(message) {
-  elements.errorMessage.classList.remove("is-warning");
+  elements.errorMessage.classList.remove("is-warning", "is-note");
   elements.errorMessage.textContent = message;
 }
 
 // Same banner in amber for input-quality notices that are not failures.
 function setInputWarning(message) {
+  elements.errorMessage.classList.remove("is-note");
   elements.errorMessage.classList.add("is-warning");
+  elements.errorMessage.textContent = message;
+}
+
+// Neutral, dim informational line in the same banner slot.
+function setInputNote(message) {
+  elements.errorMessage.classList.remove("is-warning");
+  elements.errorMessage.classList.add("is-note");
   elements.errorMessage.textContent = message;
 }
 
