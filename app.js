@@ -24,7 +24,7 @@ const CONFIG = {
   acquireMinMs: 30,
   acquireMinSamples: 2,
   acquireStabilityCents: 45,
-  candidateMaxGapMs: 90,
+  candidateMaxGapMs: 260,
   trackMedianWindow: 3,
   // Per-frame step limit while tracking. Real vibrato and bends move well
   // under 40 cents per animation frame; a fast string change sweeps the
@@ -193,7 +193,9 @@ const CONFIG = {
   octaveTripleFoldMaxRun: 8,
   // No note may begin without an attack: acquisition requires an RMS onset
   // within this window. (Switching between notes while tracking is exempt.)
-  onsetAcquireWindowMs: 700,
+  onsetAcquireWindowMs: 1000,
+  // A rescued reading must land within this of the comb-picked target.
+  harmonicRescueRadiusCents: 150,
   // The fold also applies for a short while AFTER tracking ends. The player
   // tunes one string continuously, and a device noise gate can chop the note
   // into separate episodes; on re-acquisition a subharmonic reading (a worn G
@@ -880,11 +882,58 @@ function analyseFrame(now) {
       pitchTracker.state === PITCH_TRACKER_STATES.RELEASE
         ? pitchTracker.valueHz
         : null;
-    const { hz: rawHz, clarity, folded } = pitchAnalyzer.analyze(
+    let { hz: rawHz, clarity, folded } = pitchAnalyzer.analyze(
       waveformBuffer,
       audioContext.sampleRate,
       { referenceHz },
     );
+
+    // Harmonic-ladder rescue. Bluetooth/phone mics high-pass the low E so hard
+    // that its 82 Hz fundamental almost vanishes (measured f0 at ~1/3 of the
+    // 2nd harmonic on this user's rig) and the short-window detector returns
+    // nothing at all. The harmonics are still strong, so when the coarse
+    // analyzer fails: pick the target string whose harmonic comb carries the
+    // most energy, then let the long-window NSDF measure the true pitch seeded
+    // there. The NSDF itself and a range check validate the guess — pitchless
+    // input (noise-gate comfort noise) fails NSDF and rescues nothing.
+    if (
+      !Number.isFinite(rawHz) &&
+      refineBufferReady &&
+      targetsHz.length > 0 &&
+      rms >= CONFIG.rmsAcquireMin
+    ) {
+      let combBest = null;
+      let combBestScore = 0;
+      for (const target of targetsHz) {
+        let score = 0;
+        for (let k = 1; k <= 4; k += 1) {
+          const harmonicHz = target * k;
+          if (harmonicHz < audioContext.sampleRate / 2) {
+            score += harmonicMagnitude(harmonicHz);
+          }
+        }
+        if (score > combBestScore) {
+          combBestScore = score;
+          combBest = target;
+        }
+      }
+      if (combBest !== null && combBestScore > 0) {
+        const rescue = fineAnalyzer.analyze(
+          refineBuffer,
+          audioContext.sampleRate,
+          { referenceHz: combBest },
+        );
+        if (
+          Number.isFinite(rescue.hz) &&
+          Math.abs(centsBetween(rescue.hz, combBest)) <= CONFIG.harmonicRescueRadiusCents
+        ) {
+          rawHz = rescue.hz;
+          // The comb pick + NSDF agreement + range check are stronger evidence
+          // than the raw NSDF height on this mangled signal; let it acquire.
+          clarity = Math.max(rescue.clarity, CONFIG.clarityAcquireMin);
+        }
+      }
+    }
 
     // Fine measurement over the long window, anchored on the tracked pitch.
     let refinedHz = Number.NaN;

@@ -25,7 +25,7 @@ const APP_CONFIG = {
   acquireMinMs: 30,
   acquireMinSamples: 2,
   acquireStabilityCents: 45,
-  candidateMaxGapMs: 90,
+  candidateMaxGapMs: 260,
   trackMedianWindow: 3,
   trackMaxStepCents: 70,
   switchMinMs: 30,
