@@ -410,6 +410,7 @@ let activeReferenceSource = null;
 let activeReferenceFilter = null;
 let activeReferenceMaster = null;
 let referenceAudioContext = null;
+let avoidedBluetoothInput = false;
 // Recorded acoustic-guitar reference samples (University of Iowa MIS, free of
 // use restrictions). Decoded once and reused; declared here so the init-time
 // loadGuitarSamples() call is not in these bindings' temporal dead zone.
@@ -604,6 +605,14 @@ async function startMicrophoneFromGesture() {
     await resumeAudioContext(nextContext);
     nextStream = await navigator.mediaDevices.getUserMedia(GET_USER_MEDIA_CONSTRAINTS);
 
+    // A Bluetooth headset microphone runs in hands-free mode: telephone-band
+    // sample rate, in-headset noise gating, and a high-pass that guts the low
+    // E's fundamental. Native tuner apps are immune because they never route
+    // capture to the headset — so neither do we: when the default input turns
+    // out to be one and a non-Bluetooth microphone exists, reopen on that
+    // instead. Playback (reference tones, chime) stays on the headset.
+    nextStream = await preferNonBluetoothInput(nextStream);
+
     if (generation !== lifecycleGeneration) {
       await releaseAudioResources({ context: nextContext, stream: nextStream });
       return;
@@ -722,6 +731,8 @@ async function startMicrophoneFromGesture() {
       (Number.isFinite(inputSettings.sampleRate) && inputSettings.sampleRate <= 24000);
     if (bluetoothMic) {
       setInputWarning("Bluetoothマイクは通話品質になります。内蔵マイク推奨");
+    } else if (avoidedBluetoothInput) {
+      setInputWarning("Bluetoothマイクを回避し、内蔵マイクで聴いています");
     }
 
     resetChime();
@@ -2546,6 +2557,61 @@ function setError(message) {
 function setInputWarning(message) {
   elements.errorMessage.classList.add("is-warning");
   elements.errorMessage.textContent = message;
+}
+
+// True when a track smells like a Bluetooth hands-free microphone: the label
+// says so, or the track runs at a telephone-band sample rate.
+function isHandsFreeInput(track) {
+  const settings = track?.getSettings?.() ?? {};
+  return (
+    /bluetooth|hands-?free|headset/i.test(track?.label ?? "") ||
+    (Number.isFinite(settings.sampleRate) && settings.sampleRate <= 24000)
+  );
+}
+
+// If the stream we were given uses a Bluetooth hands-free mic and any other
+// microphone exists, reopen capture on the best alternative (built-in
+// preferred). Returns the stream to use; on any failure, the original.
+async function preferNonBluetoothInput(stream) {
+  avoidedBluetoothInput = false;
+  try {
+    const track = stream?.getAudioTracks?.()[0];
+    if (!track || !isHandsFreeInput(track)) return stream;
+    if (!navigator.mediaDevices?.enumerateDevices) return stream;
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(
+      (device) =>
+        device.kind === "audioinput" &&
+        device.deviceId !== "default" &&
+        device.deviceId !== "communications" &&
+        !/bluetooth|hands-?free|headset/i.test(device.label ?? ""),
+    );
+    if (inputs.length === 0) return stream;
+    // Built-in mics label themselves as such on every platform we care about.
+    const builtIn = inputs.find((device) =>
+      /built-?in|internal|macbook|内蔵/i.test(device.label ?? ""),
+    );
+    const chosen = builtIn ?? inputs[0];
+
+    const retryConstraints = {
+      audio: {
+        ...GET_USER_MEDIA_CONSTRAINTS.audio,
+        deviceId: { exact: chosen.deviceId },
+      },
+    };
+    const replacement = await navigator.mediaDevices.getUserMedia(retryConstraints);
+    const replacementTrack = replacement.getAudioTracks()[0];
+    if (!replacementTrack || isHandsFreeInput(replacementTrack)) {
+      for (const t of replacement.getTracks()) t.stop();
+      return stream;
+    }
+    for (const t of stream.getTracks()) t.stop();
+    avoidedBluetoothInput = true;
+    return replacement;
+  } catch {
+    return stream;
+  }
 }
 
 function isMicrophoneEnvironmentSupported(AudioContextClass) {
