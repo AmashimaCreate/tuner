@@ -196,6 +196,11 @@ const CONFIG = {
   onsetAcquireWindowMs: 1000,
   // A rescued reading must land within this of the comb-picked target.
   harmonicRescueRadiusCents: 150,
+  // Rescue only after this many consecutive coarse failures: a mangled-mic
+  // signal fails for long stretches, while a note-transition glitch fails for
+  // one or two frames — rescuing those mixed windows produced garbage
+  // readings that could briefly switch the display to a wrong string.
+  rescueMinNaNFrames: 3,
   // The fold also applies for a short while AFTER tracking ends. The player
   // tunes one string continuously, and a device noise gate can chop the note
   // into separate episodes; on re-acquisition a subharmonic reading (a worn G
@@ -411,6 +416,7 @@ let activeReferenceFilter = null;
 let activeReferenceMaster = null;
 let referenceAudioContext = null;
 let avoidedBluetoothInput = false;
+let coarseNaNRun = 0;
 // Recorded acoustic-guitar reference samples (University of Iowa MIS, free of
 // use restrictions). Decoded once and reused; declared here so the init-time
 // loadGuitarSamples() call is not in these bindings' temporal dead zone.
@@ -911,8 +917,10 @@ function analyseFrame(now) {
     // most energy, then let the long-window NSDF measure the true pitch seeded
     // there. The NSDF itself and a range check validate the guess — pitchless
     // input (noise-gate comfort noise) fails NSDF and rescues nothing.
+    coarseNaNRun = Number.isFinite(rawHz) ? 0 : coarseNaNRun + 1;
     if (
       !Number.isFinite(rawHz) &&
+      coarseNaNRun >= CONFIG.rescueMinNaNFrames &&
       refineBufferReady &&
       targetsHz.length > 0 &&
       rms >= CONFIG.rmsAcquireMin
