@@ -65,12 +65,18 @@ const CONFIG = {
   // letter but hold the needle blank until the pitch has stayed within
   // displaySettleSpreadCents for displaySettleMs, so a transient is never
   // committed or latched (the same idea as GuitarTuna discarding bad samples).
-  displaySettleMs: 90,
-  displaySettleSpreadCents: 30,
+  displaySettleMs: 180,
+  displaySettleSpreadCents: 2.5,
   // Safety valve: if a note never settles (sustained vibrato, or turning the
   // peg fast right at the attack), commit anyway after this long so the needle
   // can never stay blank — a transient is always gone well before this.
-  displaySettleMaxMs: 350,
+  displaySettleMaxMs: 900,
+  // For this long after a pluck onset, the display filter stays at rest
+  // smoothing and its speed estimate bleeds off: the attack transient reads
+  // several cents sharp before gliding down (worst on the thick low strings),
+  // and letting it open the filter drew a rise-then-fall on every pluck.
+  // Time-bounded by the onset clock — deliberately NOT level-driven.
+  onsetCalmMs: 650,
   // NOTE on decay handling: there is deliberately NONE. A plucked string
   // genuinely falls a few cents as it fades; three designs tried to hide that
   // (dB-proportional compensation, a deep-decay freeze, then slow-follow) and
@@ -400,6 +406,7 @@ let onsetStart = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
+let filterFarSince = null;
 let displayedCentsInt = null;
 let bubbleTargetPosition = null;
 let bubblePosition = null;
@@ -408,6 +415,7 @@ let gaugeBand = "is-green";
 let octaveFoldRun = 0;
 let rmsFastEma = 0;
 let lastOnsetAt = -Infinity;
+let lastSoftOnsetAt = -Infinity;
 let lastRefinedHz = Number.NaN;
 let lastRefinedAt = -Infinity;
 let displayTuned = false;
@@ -1059,6 +1067,9 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     if (rms > Math.max(rmsFastEma * 2.5, CONFIG.rmsAcquireMin)) {
       lastOnsetAt = now;
     }
+    if (rms > Math.max(rmsFastEma * 1.5, CONFIG.rmsAcquireMin)) {
+      lastSoftOnsetAt = now;
+    }
     rmsFastEma = rmsFastEma + (rms - rmsFastEma) * 0.3;
   }
 
@@ -1282,25 +1293,42 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     onsetSamples = [];
     onsetStart = now;
     // Seed the filter at the held value so the needle continues from where it
-    // was instead of jumping to the raw attack reading.
-    if (instantRelock) filterCents(smoothedCents, now);
+    // was instead of jumping to the raw attack reading. The calm window is for
+    // re-plucks WHILE tracking (no reseed); after a relock the seed itself is
+    // the protection, and calm would only freeze any error in the held value.
+    if (instantRelock) {
+      filterCents(smoothedCents, now);
+      lastSoftOnsetAt = -Infinity;
+    }
   }
   previousMidi = midi;
   lastDisplayAt = now;
 
   if (!displayConfirmed) {
-    onsetSamples.push(measuredCents);
-    if (onsetSamples.length > 12) onsetSamples.shift();
-    const spread = Math.max(...onsetSamples) - Math.min(...onsetSamples);
+    // TIME-based settle window (a frame-count window shrinks at high fps and
+    // let the attack glide's spread slip under the threshold): keep ~450 ms of
+    // samples and commit only once they span enough time AND have stopped
+    // moving. The attack glide keeps the spread high, so the number appears
+    // already settled instead of landing sharp and sliding down.
+    onsetSamples.push({ t: now, cents: measuredCents });
+    while (onsetSamples.length > 0 && now - onsetSamples[0].t > 450) {
+      onsetSamples.shift();
+    }
+    const values = onsetSamples.map((sample) => sample.cents);
+    const spread = Math.max(...values) - Math.min(...values);
+    const windowSpanMs = now - onsetSamples[0].t;
     const waited = now - onsetStart;
     const settled =
       waited >= CONFIG.displaySettleMs &&
       onsetSamples.length >= 3 &&
+      windowSpanMs >= 400 &&
       spread <= CONFIG.displaySettleSpreadCents;
     const timedOut = waited >= CONFIG.displaySettleMaxMs && onsetSamples.length >= 3;
     if (settled || timedOut) {
-      // Seed the filter at the settled median so the needle appears in place.
-      const sorted = [...onsetSamples].sort((a, b) => a - b);
+      // Seed the filter at the median of the newest samples so the needle
+      // appears in place, past the attack.
+      const recent = values.slice(-5);
+      const sorted = [...recent].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)];
       resetCentsFilter();
       smoothedCents = filterCents(median, now);
@@ -1422,11 +1450,29 @@ function filterCents(cents, nowMs) {
   const deltaSec = Math.max(1e-3, nowSec - filterPrevAt);
   filterPrevAt = nowSec;
 
+  // A transient (attack) departs and returns within ~300 ms; a measurement
+  // that STAYS far from the displayed value is not a transient — the display
+  // is wrong (e.g. polluted by a mute click) and calm must not pin it there.
+  if (Math.abs(cents - filterPrevCents) > 12) {
+    if (filterFarSince === null) filterFarSince = nowMs;
+  } else {
+    filterFarSince = null;
+  }
+  if (filterFarSince !== null && nowMs - filterFarSince > 300) {
+    // Consume the onset: once a persistent error breaks the calm, it stays
+    // broken until the next pluck, or the filter re-pins halfway home.
+    lastSoftOnsetAt = -Infinity;
+  }
+  const calm = nowMs - lastSoftOnsetAt < CONFIG.onsetCalmMs;
   const rawSpeed = (cents - filterPrevCents) / deltaSec;
   const speedAlpha = lowpassAlpha(CONFIG.oneEuroDerivativeCutoffHz, deltaSec);
-  filterPrevSpeed = speedAlpha * rawSpeed + (1 - speedAlpha) * filterPrevSpeed;
+  filterPrevSpeed = calm
+    ? filterPrevSpeed * 0.7
+    : speedAlpha * rawSpeed + (1 - speedAlpha) * filterPrevSpeed;
 
-  const cutoffHz = CONFIG.oneEuroMinCutoffHz + CONFIG.oneEuroBeta * Math.abs(filterPrevSpeed);
+  const cutoffHz = calm
+    ? CONFIG.oneEuroMinCutoffHz * 0.4
+    : CONFIG.oneEuroMinCutoffHz + CONFIG.oneEuroBeta * Math.abs(filterPrevSpeed);
   const alpha = lowpassAlpha(cutoffHz, deltaSec);
   filterPrevCents = alpha * cents + (1 - alpha) * filterPrevCents;
   return filterPrevCents;
@@ -1441,6 +1487,7 @@ function resetCentsFilter() {
   filterPrevCents = null;
   filterPrevSpeed = 0;
   filterPrevAt = null;
+  filterFarSince = null;
 }
 
 function numberAscending(left, right) {
