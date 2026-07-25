@@ -389,6 +389,10 @@ let lifecycleGeneration = 0;
 let trackEndedHandler = null;
 
 const rawHzHistory = [];
+// Short history of in-range raw readings with their level, for the ambient
+// test: a pitch that already existed BEFORE a pluck onset at the same level
+// is room content (mains hum), not the note that was just played.
+const ambientHistory = [];
 const stableHzHistory = [];
 let previousMidi = null;
 let chromaticHeldMidi = null;
@@ -1074,13 +1078,19 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // signals with no attack must never acquire. Switches from a tracked note
   // are unaffected.
   const onsetRecent = now - lastOnsetAt <= CONFIG.onsetAcquireWindowMs;
-  const signalUsable =
-    rawInRange &&
-    Number.isFinite(rms) &&
-    rms >= rmsMin &&
-    (trackingExistingPitch || onsetRecent);
+  const basicUsable = rawInRange && Number.isFinite(rms) && rms >= rmsMin;
 
-  if (rawInRange) pushJitterSample(rawHzHistory, now, rawHz);
+  if (rawInRange) {
+    pushJitterSample(rawHzHistory, now, rawHz);
+    if (Number.isFinite(rms)) {
+      // Store the pitch's OWN narrow-line level, not the broadband rms: a
+      // hand bump raises total rms without touching the hum's 98 Hz line.
+      ambientHistory.push({ t: now, hz: rawHz, mag: lineStrength(rawHz) });
+      while (ambientHistory.length > 0 && ambientHistory[0].t < now - 2200) {
+        ambientHistory.shift();
+      }
+    }
+  }
 
   // Fix an octave-down (subharmonic) misdetection BEFORE the tracker sees it.
   // A plucked G string intermittently reads at exactly half its pitch (~97.7 Hz
@@ -1088,12 +1098,16 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // release episodes and dropouts, which is why G was the least stable string.
   // The odd/even harmonic check already separates a real low note from a
   // subharmonic, so run it on the raw value instead of only on the output.
+  // Folding runs BEFORE the hijack guard below so a subharmonic that folds
+  // back onto the tracked pitch still counts as continuation.
   let trackedHz = Number.NaN;
-  if (signalUsable) {
+  if (basicUsable) {
     trackedHz = foldOctaveToTracked(octaveCorrectHz(rawHz), now);
   } else {
     octaveFoldRun = 0;
   }
+
+  const signalUsable = basicUsable && (trackingExistingPitch || onsetRecent);
   const octaveCorrected = signalUsable && trackedHz !== rawHz;
 
   const result = pitchTracker.update({
@@ -1102,6 +1116,30 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     nowMs: now,
   });
   syncTrackerState(result);
+
+  // The onset gate proves an attack HAPPENED; this proves the acquired pitch
+  // BELONGS to it. Mains hum sits at a steady level for seconds — a hand bump
+  // or pick click opens an onset window and the hum walks in reading as an A
+  // while the player is tuning the low E. A pitch already present before the
+  // onset at essentially the same level is ambient; a re-plucked string is
+  // exempt both by the recently-tracked check and by its level jump.
+  if (
+    result.accepted &&
+    result.event === "acquired" &&
+    Number.isFinite(result.valueHz) &&
+    isAmbientAcquisition(result.valueHz, now)
+  ) {
+    syncTrackerState(pitchTracker.reset());
+    updateDebugPanel({
+      rawHz,
+      clarity,
+      stableHz: lastStableHz,
+      rms,
+      correction: lastPitchCorrection,
+      trackerEvent: "ambient-reject",
+    });
+    return;
+  }
 
   if (result.accepted && Number.isFinite(result.valueHz)) {
     const stableHz = result.valueHz;
@@ -2586,6 +2624,45 @@ function calculateRms(buffer) {
   let sumSquares = 0;
   for (const sample of buffer) sumSquares += sample * sample;
   return Math.sqrt(sumSquares / buffer.length);
+}
+
+// Narrow-line spectral strength: the Goertzel level at hz minus the average
+// of two flanking probes ±60c away. Spectral leakage from a loud NEARBY note
+// lands on the flanks too and cancels, so a narrow mains-hum line measures
+// as itself even while another string rings.
+function lineStrength(hz) {
+  const flankLow = harmonicMagnitude(hz * 2 ** (-60 / 1200));
+  const flankHigh = harmonicMagnitude(hz * 2 ** (60 / 1200));
+  return Math.max(0, harmonicMagnitude(hz) - (flankLow + flankHigh) / 2);
+}
+
+function isAmbientAcquisition(hz, now) {
+  // A blank tuner shows whatever it hears; the guard protects a HELD reading.
+  if (smoothedCents === null) return false;
+  // Re-acquiring the note we were just tracking is normal continuation.
+  if (
+    Number.isFinite(lastStableHz) &&
+    lastStableHz > 0 &&
+    now - lastStableAt <= 10000 &&
+    Math.abs(centsBetween(hz, lastStableHz)) <= 120
+  ) {
+    return false;
+  }
+  const from = lastOnsetAt - 1800;
+  const to = lastOnsetAt - 60;
+  const pre = ambientHistory.filter(
+    (entry) =>
+      entry.t >= from &&
+      entry.t <= to &&
+      Math.abs(centsBetween(entry.hz, hz)) <= 60,
+  );
+  if (pre.length < 3) return false;
+  const sorted = pre.map((entry) => entry.mag).sort((a, b) => a - b);
+  const preMedian = sorted[Math.floor(sorted.length / 2)];
+  // A genuine attack multiplies the pitch's own spectral level; ambient hum
+  // stays where it was no matter what else banged in the room.
+  const currentMag = lineStrength(hz);
+  return !(currentMag > 0 && preMedian > 0 && currentMag >= preMedian * 1.8);
 }
 
 function pushJitterSample(history, now, hz) {
