@@ -4,6 +4,7 @@ export const CATEGORIES = [
   { id: "drop", label: "ドロップ系" },
   { id: "open", label: "オープン系" },
   { id: "transpose", label: "全体移調" },
+  { id: "seven", label: "7弦" },
   { id: "special", label: "特殊" },
 ];
 
@@ -27,6 +28,9 @@ export const TUNINGS = [
   { id: "openEm", name: "オープンEm", cat: "open", notes: ["E2", "B2", "E3", "G3", "B3", "E4"] },
   { id: "openD", name: "オープンD", cat: "open", notes: ["D2", "A2", "D3", "F#3", "A3", "D4"] },
   { id: "openDm", name: "オープンDm", cat: "open", notes: ["D2", "A2", "D3", "F3", "A3", "D4"] },
+
+  { id: "sevenStandard", name: "7弦レギュラー", cat: "seven", notes: ["B1", "E2", "A2", "D3", "G3", "B3", "E4"] },
+  { id: "sevenDropA", name: "7弦ドロップA", cat: "seven", notes: ["A1", "E2", "A2", "D3", "G3", "B3", "E4"] },
 
   { id: "halfDown", name: "半音下げ", cat: "transpose", notes: ["D#2", "G#2", "C#3", "F#3", "A#3", "D#4"] },
   { id: "wholeDown", name: "全音下げ", cat: "transpose", notes: ["D2", "G2", "C3", "F3", "A3", "D4"] },

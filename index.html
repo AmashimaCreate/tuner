@@ -237,6 +237,13 @@
       .string-line[data-i="3"] { stroke-width: 1.35; }
       .string-line[data-i="4"] { stroke-width: 1.15; }
       .string-line[data-i="5"] { stroke-width: 1; }
+      .string-line[data-i="6"] { stroke-width: 1; }
+      .headstock[data-type="seven"] .string-line[data-i="0"] { stroke-width: 2.3; }
+      .headstock[data-type="seven"] .string-line[data-i="1"] { stroke-width: 2.05; }
+      .headstock[data-type="seven"] .string-line[data-i="2"] { stroke-width: 1.85; }
+      .headstock[data-type="seven"] .string-line[data-i="3"] { stroke-width: 1.6; }
+      .headstock[data-type="seven"] .string-line[data-i="4"] { stroke-width: 1.35; }
+      .headstock[data-type="seven"] .string-line[data-i="5"] { stroke-width: 1.15; }
 
       .string-line.is-active {
         stroke: var(--measure-color);
@@ -274,7 +281,8 @@
         outline-offset: 2px;
       }
 
-      .headstock[data-type="six-inline"] .peg-ring {
+      .headstock[data-type="six-inline"] .peg-ring,
+      .headstock[data-type="seven"] .peg-ring {
         display: none;
       }
 
@@ -1059,6 +1067,7 @@
               aria-hidden="true"
             >
               <path class="string-line is-wound" data-i="0" vector-effect="non-scaling-stroke" d="M351 1672 L351 1390 L323 892"></path>
+              <path class="string-line is-wound" data-i="6" vector-effect="non-scaling-stroke" d="" hidden></path>
               <path class="string-line is-wound" data-i="1" vector-effect="non-scaling-stroke" d="M396 1672 L396 1390 L323 635"></path>
               <path class="string-line is-wound" data-i="2" vector-effect="non-scaling-stroke" d="M441 1672 L441 1390 L323 374"></path>
               <path class="string-line is-plain" data-i="3" vector-effect="non-scaling-stroke" d="M486 1672 L486 1390 L612 374"></path>
@@ -1086,6 +1095,10 @@
               <span class="peg-label">B3</span>
             </button>
             <button class="peg" data-i="5" data-side="right" type="button" aria-pressed="false">
+              <span class="peg-ring" aria-hidden="true"></span>
+              <span class="peg-label">E4</span>
+            </button>
+            <button class="peg" data-i="6" data-side="right" type="button" aria-pressed="false" hidden>
               <span class="peg-ring" aria-hidden="true"></span>
               <span class="peg-label">E4</span>
             </button>

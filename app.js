@@ -246,6 +246,28 @@ const HEADSTOCK_TYPES = {
       [[576, 1672], [576, 1390], [612, 892]],
     ],
   },
+  seven: {
+    label: "4対3",
+    image: "./assets/headstock-ebony-no-strings.png",
+    pegLayout: [
+      { x: 16, y: 70, side: "left" },
+      { x: 16, y: 52, side: "left" },
+      { x: 16, y: 34, side: "left" },
+      { x: 16, y: 16, side: "left" },
+      { x: 84, y: 22, side: "right" },
+      { x: 84, y: 42, side: "right" },
+      { x: 84, y: 62, side: "right" },
+    ],
+    stringLayout: [
+      [[330, 1672], [330, 1390], [318, 1120]],
+      [[368, 1672], [368, 1390], [323, 892]],
+      [[406, 1672], [406, 1390], [323, 635]],
+      [[444, 1672], [444, 1390], [323, 374]],
+      [[482, 1672], [482, 1390], [612, 374]],
+      [[520, 1672], [520, 1390], [612, 635]],
+      [[558, 1672], [558, 1390], [612, 892]],
+    ],
+  },
   "six-inline": {
     label: "6連",
     image: "./assets/headstock-six-inline.png",
@@ -427,15 +449,37 @@ const GUITAR_SAMPLE_NOTES = ["E2", "A2", "D3", "G3", "B3", "E4"];
 const guitarSampleCache = new Map();
 let guitarSamplesPromise = null;
 
-const pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
-  minHz: CONFIG.minPitchHz,
+// The detection floor follows the selected tuning: 62 Hz keeps mains hum out
+// of range for six-string tunings, but a 7-string's low B (61.7 Hz) — and
+// drop A (55 Hz) — sit below it, so the floor drops to lowest-target −150c
+// (never below 51 Hz, the edge of the 50 Hz notch) and the analyzers are
+// rebuilt when it changes.
+let currentMinPitchHz = CONFIG.minPitchHz;
+let pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
+  minHz: currentMinPitchHz,
+  maxHz: CONFIG.maxPitchHz,
+});
+let fineAnalyzer = new GuitarPitchAnalyzer(CONFIG.refineFftSize, {
+  minHz: currentMinPitchHz,
   maxHz: CONFIG.maxPitchHz,
 });
 
-const fineAnalyzer = new GuitarPitchAnalyzer(CONFIG.refineFftSize, {
-  minHz: CONFIG.minPitchHz,
-  maxHz: CONFIG.maxPitchHz,
-});
+function applyPitchFloor() {
+  const lowest = targetsHz.length ? Math.min(...targetsHz) : Number.NaN;
+  const floor = Number.isFinite(lowest)
+    ? Math.min(CONFIG.minPitchHz, Math.max(51, lowest * 2 ** (-150 / 1200)))
+    : CONFIG.minPitchHz;
+  if (floor === currentMinPitchHz) return;
+  currentMinPitchHz = floor;
+  pitchAnalyzer = new GuitarPitchAnalyzer(CONFIG.fftSize, {
+    minHz: currentMinPitchHz,
+    maxHz: CONFIG.maxPitchHz,
+  });
+  fineAnalyzer = new GuitarPitchAnalyzer(CONFIG.refineFftSize, {
+    minHz: currentMinPitchHz,
+    maxHz: CONFIG.maxPitchHz,
+  });
+}
 
 // Hann window over the long buffer, precomputed once for the octave corrector's
 // harmonic-energy probes.
@@ -1001,7 +1045,7 @@ function analyseFrame(now) {
 function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refinedHz = Number.NaN }) {
   const rawInRange =
     Number.isFinite(rawHz) &&
-    rawHz >= CONFIG.minPitchHz &&
+    rawHz >= currentMinPitchHz &&
     rawHz <= CONFIG.maxPitchHz;
   // Pluck-onset detector: a real new note arrives with an RMS jump, a decay
   // artifact does not. The ×3 fold below uses this to tell a genuine E2 pluck
@@ -2070,7 +2114,12 @@ function activeString() {
 }
 
 function onPegTap(index) {
-  if (currentTuning.notes === null || !Number.isInteger(index) || index < 0 || index > 5) {
+  if (
+    currentTuning.notes === null ||
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= currentTuning.notes.length
+  ) {
     return;
   }
 
@@ -2325,6 +2374,7 @@ function setConcertA(hz) {
 
 function rebuildTargets() {
   targetsHz = targetsMidi.map(midiToHz);
+  applyPitchFloor();
 }
 
 function mirrorX(x, width = 220) {
@@ -2332,8 +2382,12 @@ function mirrorX(x, width = 220) {
 }
 
 function renderHeadstockLayout() {
-  const type = HEADSTOCK_TYPES[headstockType];
-  elements.headstock.dataset.type = headstockType;
+  // A seven-string tuning always uses the dedicated 4+3 layout; the stored
+  // 3対3/6連 preference applies to six-string tunings only.
+  const stringCount = currentTuning.notes?.length ?? 6;
+  const effectiveType = stringCount === 7 ? "seven" : headstockType;
+  const type = HEADSTOCK_TYPES[effectiveType];
+  elements.headstock.dataset.type = effectiveType;
   elements.headstock.dataset.leftHanded = String(leftHanded);
   if (elements.headstockImage.getAttribute("src") !== type.image) {
     elements.headstockImage.setAttribute("src", type.image);
@@ -2342,6 +2396,7 @@ function renderHeadstockLayout() {
   for (const peg of elements.headstock.querySelectorAll(".peg")) {
     const index = Number(peg.dataset.i);
     const layout = type.pegLayout[index];
+    peg.hidden = !layout;
     if (!layout) continue;
     peg.style.left = `${mirrorX(layout.x, 100)}%`;
     peg.style.top = `${layout.y}%`;
@@ -2353,6 +2408,7 @@ function renderHeadstockLayout() {
   for (const stringLine of elements.headstock.querySelectorAll(".string-line")) {
     const index = Number(stringLine.dataset.i);
     const points = type.stringLayout[index];
+    stringLine.hidden = !points;
     if (!points) continue;
     const path = points.map(([x, y], pointIndex) => {
       const command = pointIndex === 0 ? "M" : "L";
@@ -2363,7 +2419,7 @@ function renderHeadstockLayout() {
 
   elements.headstock.setAttribute(
     "aria-label",
-    `${leftHanded ? "左手用・" : ""}${type.label}・6弦ヘッドストック`,
+    `${leftHanded ? "左手用・" : ""}${type.label}・${stringCount}弦ヘッドストック`,
   );
 }
 
@@ -2374,7 +2430,7 @@ function renderHeadstock() {
 
   for (const peg of elements.headstock.querySelectorAll(".peg")) {
     const index = Number(peg.dataset.i);
-    const stringNumber = 6 - index;
+    const stringNumber = (currentTuning.notes?.length ?? 6) - index;
     const note = currentTuning.notes?.[index] ?? "—";
     const isActive = index === active;
     const isManual = index === manualString;
