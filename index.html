@@ -171,7 +171,7 @@
         position: relative;
         min-height: 0;
         display: grid;
-        place-items: start center;
+        place-items: center;
         overflow: hidden;
       }
 
@@ -181,7 +181,7 @@
         width: auto;
         height: 100%;
         max-width: 64vw;
-        max-height: 355px;
+        max-height: min(58vh, 520px);
         aspect-ratio: 941 / 1672;
         overflow: visible;
         font-variant-numeric: tabular-nums;
@@ -342,6 +342,19 @@
         border-width: 3px;
       }
 
+      /* While the tapped string's reference tone rings, its peg pulses. */
+      .peg.is-playing .peg-label {
+        color: var(--accent);
+        border-color: var(--accent);
+        animation: peg-playing-pulse 0.9s ease-out infinite;
+      }
+
+      @keyframes peg-playing-pulse {
+        0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+        70% { box-shadow: 0 0 0 14px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
+      }
+
       .peg[data-i="0"] { left: 16%; top: 54%; }
       .peg[data-i="1"] { left: 16%; top: 38%; }
       .peg[data-i="2"] { left: 16%; top: 22%; }
@@ -467,7 +480,7 @@
 
       .gauge-bubble-text {
         fill: var(--measure-color);
-        font-size: 13px;
+        font-size: 15.5px;
         font-weight: 800;
         text-anchor: middle;
         dominant-baseline: central;
@@ -490,13 +503,13 @@
       }
 
       .gauge-note {
-        font-size: 40px;
+        font-size: 50px;
         font-weight: 760;
         letter-spacing: -0.04em;
       }
 
       .gauge-octave {
-        font-size: 16px;
+        font-size: 20px;
         font-weight: 750;
       }
 
@@ -563,6 +576,34 @@
       .controls {
         display: grid;
         gap: 6px;
+      }
+
+      .mic-status {
+        min-height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+      }
+
+      .input-level {
+        flex: 0 0 auto;
+        width: 56px;
+        height: 5px;
+        border-radius: 3px;
+        overflow: hidden;
+        background: rgb(255 255 255 / 8%);
+      }
+
+      .input-level-fill {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border-radius: 3px;
+        background: var(--tuned);
+        transform: scaleX(0);
+        transform-origin: left;
+        transition: transform 80ms linear;
       }
 
       .error-message {
@@ -966,11 +1007,11 @@
             <line id="gaugeCenterLine" class="gauge-center-line" aria-hidden="true"></line>
             <line id="gaugeNotch" class="gauge-notch" aria-hidden="true"></line>
             <g class="gauge-readout signal-dependent" aria-hidden="true">
-              <text id="gaugeNote" class="gauge-note" x="140" y="64">—</text>
-              <text id="gaugeOctave" class="gauge-octave" x="172" y="64"></text>
+              <text id="gaugeNote" class="gauge-note" x="140" y="70">—</text>
+              <text id="gaugeOctave" class="gauge-octave" x="178" y="70"></text>
             </g>
             <g id="gaugeBubble" class="gauge-bubble signal-dependent" aria-hidden="true" hidden>
-              <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="19"></circle>
+              <circle id="gaugeBubbleCircle" class="gauge-bubble-circle" r="22"></circle>
               <text id="gaugeCents" class="gauge-bubble-text" y="0">—</text>
             </g>
             <g class="signal-dependent" aria-hidden="true">
@@ -1053,7 +1094,12 @@
       </main>
 
       <footer class="controls">
-        <p id="errorMessage" class="error-message" role="alert" aria-live="assertive"></p>
+        <div class="mic-status">
+          <span id="inputLevel" class="input-level" aria-hidden="true" hidden>
+            <span id="inputLevelFill" class="input-level-fill"></span>
+          </span>
+          <p id="errorMessage" class="error-message" role="alert" aria-live="assertive"></p>
+        </div>
         <button id="micButton" class="mic-button" type="button" aria-pressed="false">
           チューニング開始
         </button>

@@ -327,6 +327,8 @@ const elements = {
   pitchMeter: document.querySelector("#pitchMeter"),
   micButton: document.querySelector("#micButton"),
   errorMessage: document.querySelector("#errorMessage"),
+  inputLevel: document.querySelector("#inputLevel"),
+  inputLevelFill: document.querySelector("#inputLevelFill"),
   debugPanel: document.querySelector("#debugPanel"),
   debugCapture: document.querySelector("#debugCapture"),
   debugRaw: document.querySelector("#debugRaw"),
@@ -417,6 +419,7 @@ let activeReferenceMaster = null;
 let referenceAudioContext = null;
 let avoidedBluetoothInput = false;
 let coarseNaNRun = 0;
+let pegPlayingTimer = 0;
 // Recorded acoustic-guitar reference samples (University of Iowa MIS, free of
 // use restrictions). Decoded once and reused; declared here so the init-time
 // loadGuitarSamples() call is not in these bindings' temporal dead zone.
@@ -890,6 +893,10 @@ function analyseFrame(now) {
     analyserNode.getFloatTimeDomainData(waveformBuffer);
     const rms = calculateRms(waveformBuffer);
     lastMeasuredRms = rms;
+    // Live input level (-60..-20 dB mapped to 0..1): shows at a glance whether
+    // the microphone is delivering signal at all.
+    const level = clamp((20 * Math.log10(Math.max(rms, 1e-5)) + 60) / 40, 0, 1);
+    elements.inputLevelFill.style.transform = `scaleX(${level.toFixed(3)})`;
 
     // Keep the long buffer current every frame, tracking or not: the octave
     // corrector needs it at the acquiring frame, before a tracked pitch exists.
@@ -1801,6 +1808,7 @@ function playStringReference(index) {
     );
     elements.tunerMain.dataset.inputBlanked = "true";
   }
+  return toneMs;
 }
 
 function dimDisplay() {
@@ -2069,7 +2077,18 @@ function onPegTap(index) {
   resetChime();
   resetDetectionData();
   resetDisplay();
-  playStringReference(index);
+  const toneMs = playStringReference(index) ?? 0;
+
+  // Pulse the tapped peg for as long as its reference tone rings, so the tap
+  // visibly "plays" the string.
+  const peg = elements.headstock.querySelector(`.peg[data-i="${index}"]`);
+  if (peg && toneMs > 0) {
+    peg.classList.remove("is-playing");
+    void peg.offsetWidth;
+    peg.classList.add("is-playing");
+    clearTimeout(pegPlayingTimer);
+    pegPlayingTimer = setTimeout(() => peg.classList.remove("is-playing"), toneMs);
+  }
 }
 
 function applyTuning(id, { persist }) {
@@ -2558,6 +2577,8 @@ function setButtonActive(active) {
   elements.micButton.removeAttribute("aria-busy");
   elements.micButton.setAttribute("aria-pressed", String(active));
   elements.micButton.textContent = active ? "チューニング停止" : "チューニング開始";
+  elements.inputLevel.hidden = !active;
+  if (!active) elements.inputLevelFill.style.transform = "scaleX(0)";
 }
 
 function setError(message) {
