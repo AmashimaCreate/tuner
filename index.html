@@ -648,23 +648,6 @@
         font-weight: 600;
       }
 
-      .mic-button[aria-pressed="true"]::before {
-        content: "";
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        margin-right: 10px;
-        border-radius: 50%;
-        vertical-align: middle;
-        background: var(--tuned);
-        animation: listen-pulse 1.6s ease-in-out infinite;
-      }
-
-      @keyframes listen-pulse {
-        0%, 100% { opacity: 0.35; transform: scale(0.85); }
-        50% { opacity: 1; transform: scale(1); }
-      }
-
       .mic-button {
         width: 100%;
         min-height: 58px;
