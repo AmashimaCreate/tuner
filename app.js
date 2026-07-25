@@ -1743,11 +1743,13 @@ function loadGuitarSamples() {
   return guitarSamplesPromise;
 }
 
-// Nearest loaded sample by log-frequency, so the playback-rate stretch is small.
-// Rejects anything more than ~3.5 semitones away — that guards the cold-load
-// window (only some notes decoded) from substituting a wrong-octave sample, and
-// sends far-off alternate tunings to the synth fallback instead of a big stretch.
-const SAMPLE_MAX_LOG2_DISTANCE = 0.29;
+// Nearest loaded sample by log-frequency, so the playback-rate stretch is
+// small. The limit guards the cold-load window (only some notes decoded) from
+// substituting a wrong-octave sample. It is generous enough to reach the
+// 7-string low B (0.42 below the E2 sample) and drop A (0.58): a real
+// recording pitched down sounds like the deeper, slower string it stands in
+// for, while the synthesised fallback is exactly the tone the user rejected.
+const SAMPLE_MAX_LOG2_DISTANCE = 0.62;
 function pickGuitarSample(hz) {
   let best = null;
   let bestDistance = Infinity;
