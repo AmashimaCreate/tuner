@@ -266,6 +266,10 @@
       }
 
       .peg:focus-visible {
+        outline: none;
+      }
+
+      .peg:focus-visible .peg-label {
         outline: 3px solid var(--focus);
         outline-offset: 2px;
       }
@@ -297,10 +301,10 @@
         width: 56px;
         height: 56px;
         transform: translateY(-50%);
-        color: #aeb8c4;
-        border: 1px solid rgb(255 255 255 / 7%);
+        color: #d7dde4;
+        border: 1px solid rgb(255 255 255 / 14%);
         border-radius: 50%;
-        background: #292e37;
+        background: #2c323c;
         box-shadow: 0 5px 14px rgb(0 0 0 / 22%);
         display: grid;
         place-items: center;
@@ -412,6 +416,21 @@
         stroke-width: 9;
         stroke-linecap: round;
         transition: stroke 140ms ease, filter 140ms ease;
+      }
+
+      /* Waiting for a note: the lane rests dim and the landing zone breathes. */
+      .tuner-main[data-signal="empty"] .gauge-lane,
+      .tuner-main[data-signal="empty"] #gaugeTicks {
+        opacity: 0.55;
+      }
+
+      .tuner-main[data-signal="empty"] .gauge-zone-fine {
+        animation: zone-breathe 2.8s ease-in-out infinite;
+      }
+
+      @keyframes zone-breathe {
+        0%, 100% { opacity: 0.3; }
+        50% { opacity: 0.85; }
       }
 
       /* The landing zone lights up as the note lands in tune. */
@@ -627,6 +646,23 @@
       .error-message.is-note {
         color: rgb(255 255 255 / 38%);
         font-weight: 600;
+      }
+
+      .mic-button[aria-pressed="true"]::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 10px;
+        border-radius: 50%;
+        vertical-align: middle;
+        background: var(--tuned);
+        animation: listen-pulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes listen-pulse {
+        0%, 100% { opacity: 0.35; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1); }
       }
 
       .mic-button {

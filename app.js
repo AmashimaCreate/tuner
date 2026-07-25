@@ -557,6 +557,8 @@ elements.headstock.addEventListener("click", (event) => {
   const peg = event.target.closest(".peg");
   if (!peg) return;
   onPegTap(Number(peg.dataset.i));
+  // A pointer tap must not leave a floating focus ring on the peg.
+  peg.blur();
 });
 
 elements.headstock.addEventListener("keydown", (event) => {
@@ -2081,9 +2083,11 @@ function onPegTap(index) {
 
   // Pulse the tapped peg for as long as its reference tone rings, so the tap
   // visibly "plays" the string.
+  for (const other of elements.headstock.querySelectorAll(".peg.is-playing")) {
+    other.classList.remove("is-playing");
+  }
   const peg = elements.headstock.querySelector(`.peg[data-i="${index}"]`);
   if (peg && toneMs > 0) {
-    peg.classList.remove("is-playing");
     void peg.offsetWidth;
     peg.classList.add("is-playing");
     clearTimeout(pegPlayingTimer);
