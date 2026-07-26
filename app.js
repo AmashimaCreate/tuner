@@ -210,9 +210,6 @@ const CONFIG = {
   // 60 cents), which is how a quiet pluck with no level jump gets in.
   sustainedPitchMs: 400,
   sustainedPitchFrames: 6,
-  // A far, un-plucked reading must carry at least this share of the tracked
-  // note's own narrow-line level before it is allowed to take the display.
-  takeoverDominance: 8,
   // A rescued reading must land within this of the comb-picked target.
   harmonicRescueRadiusCents: 150,
   // Rescue only after this many consecutive coarse failures: a mangled-mic
@@ -420,7 +417,6 @@ let lastDisplayAt = null;
 let displayConfirmed = false;
 let onsetSamples = [];
 let onsetStart = null;
-let pendingNote = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -1122,11 +1118,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
       // Store the pitch's OWN narrow-line level, not the broadband rms: a
       // hand bump raises total rms without touching the hum's 98 Hz line.
       ambientHistory.push({ t: now, hz: rawHz, mag: lineStrength(rawHz) });
-      // Keep enough history to still see "before the note on screen started"
-      // late in that note's life: a 2.2 s window was already discarded by the
-      // time a 4 s sustain faded, so the test found nothing and let room
-      // content take the display. Cover the display-hold instead.
-      while (ambientHistory.length > 0 && ambientHistory[0].t < now - CONFIG.ambientHistoryMs) {
+      while (ambientHistory.length > 0 && ambientHistory[0].t < now - 2200) {
         ambientHistory.shift();
       }
     }
@@ -1147,31 +1139,8 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     octaveFoldRun = 0;
   }
 
-  // While a note is alive, a FAR reading may only take over if the signal says
-  // it is actually the louder note now. Low-frequency room content sits in the
-  // open-E band and simply outlasts a decaying string — measured: a sustained
-  // G3 handed the display to E2 after 4 s as its own level fell below a steady
-  // 85 Hz rumble. Requiring the newcomer's narrow line to dominate the note we
-  // are on fixes that without any timing rule: a real string change is either
-  // plucked (an onset exempts it) or replaces the old pitch outright, and a
-  // peg turn stays near the tracked pitch. Blanket blocks were tried before
-  // and broke legitimate transitions; this one is evidence-based.
-  let outrankedByTracked = false;
-  if (
-    basicUsable &&
-    trackingExistingPitch &&
-    !onsetRecent &&
-    Number.isFinite(pitchTracker.valueHz) &&
-    Math.abs(centsBetween(trackedHz, pitchTracker.valueHz)) > CONFIG.trackMaxStepCents
-  ) {
-    outrankedByTracked =
-      lineStrength(trackedHz) < lineStrength(pitchTracker.valueHz) * CONFIG.takeoverDominance;
-  }
-
   const signalUsable =
-    basicUsable &&
-    (trackingExistingPitch || onsetRecent || sustainedPitch) &&
-    !outrankedByTracked;
+    basicUsable && (trackingExistingPitch || onsetRecent || sustainedPitch);
   const octaveCorrected = signalUsable && trackedHz !== rawHz;
 
   const result = pitchTracker.update({
@@ -1189,7 +1158,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // exempt both by the recently-tracked check and by its level jump.
   if (
     result.accepted &&
-    (result.event === "acquired" || result.event === "switched") &&
+    result.event === "acquired" &&
     Number.isFinite(result.valueHz) &&
     isAmbientAcquisition(result.valueHz, now)
   ) {
@@ -1410,13 +1379,8 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       Math.abs(measuredCents - smoothedCents) <= CONFIG.reAcquireSnapCents;
     resetCentsFilter();
     displayConfirmed = instantRelock;
-    // Re-acquiring the SAME note keeps what has been gathered: a weak string is
-    // acquired, lost and re-acquired every few frames, and clearing each time
-    // meant the buffer never held anything to commit.
-    if (midi !== previousMidi) {
-      onsetSamples = [];
-      onsetStart = now;
-    }
+    onsetSamples = [];
+    onsetStart = now;
     // Seed the filter at the held value so the needle continues from where it
     // was instead of jumping to the raw attack reading.
     if (instantRelock) filterCents(smoothedCents, now);
@@ -1517,40 +1481,9 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
 }
 
-// The settle check runs inside updateDisplay, which only runs on frames the
-// tracker accepts. A weak low string yields a couple of those a second, so the
-// timeout was never evaluated and the note letter showed with "·" and no
-// number for as long as the string rang. Finish the commit from the animation
-// loop instead, using whatever samples arrived.
-function commitStalledSettle(now) {
-  if (
-    displayConfirmed ||
-    pendingNote === null ||
-    onsetSamples.length === 0 ||
-    onsetStart === null ||
-    now - onsetStart < CONFIG.displaySettleMaxMs
-  ) {
-    return;
-  }
-  const sorted = [...onsetSamples].sort(numberAscending);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  resetCentsFilter();
-  smoothedCents = filterCents(median, now);
-  displayConfirmed = true;
-  displayedCentsInt = Math.round(smoothedCents);
-  elements.gaugeCents.textContent = formatBubbleCents(displayedCentsInt);
-  renderGaugeValue(clamp(smoothedCents, -CONFIG.meterRangeCents, CONFIG.meterRangeCents));
-  elements.pitchMeter.setAttribute("aria-valuenow", smoothedCents.toFixed(1));
-  elements.pitchMeter.setAttribute(
-    "aria-valuetext",
-    `${pendingNote.noteName}${pendingNote.octave}、${formatCents(displayedCentsInt)}`,
-  );
-}
-
 // Shown while a fresh note is still settling: the note letter is known, but the
 // needle is held blank so an attack transient never appears on the meter.
 function renderConfirmingDisplay(noteName, octave) {
-  pendingNote = { noteName, octave };
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
   elements.gaugeCents.textContent = "·";
@@ -2085,7 +2018,6 @@ function clearPitchHistory({ clearStableValue }) {
   chromaticHeldMidi = null;
   displayConfirmed = false;
   onsetSamples = [];
-  pendingNote = null;
   smoothedCents = null;
   lastDisplayAt = null;
   displayTuned = false;
@@ -2170,7 +2102,6 @@ function laneX(cents) {
 
 
 function animateBubble(now) {
-  commitStalledSettle(now);
   if (bubbleTargetPosition === null) {
     if (bubblePosition !== null) {
       bubblePosition = null;
@@ -2223,7 +2154,6 @@ function renderNoTargetDisplay() {
   smoothedCents = null;
   displayConfirmed = false;
   onsetSamples = [];
-  pendingNote = null;
   lastDisplayAt = null;
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
@@ -2694,17 +2624,10 @@ function foldOctaveToTracked(hz, now) {
   const tolerance = CONFIG.octaveFoldToleranceCents;
   let folded = hz;
   let tripleFold = false;
-  // The x3 family folds UP only. Folding a reading DOWN onto a note three
-  // times below it cannot be told from the player simply playing that note —
-  // B3 is the open E's third harmonic to within 2 cents — so a real B plucked
-  // while the low E rang could be folded into E and, because the interleaved
-  // E readings keep resetting the run counter, never released. Folding up is
-  // the case this was built for (a decaying string misread at its own third
-  // subharmonic) and stays.
-  for (const candidate of [hz * 2, hz / 2, hz * 3]) {
+  for (const candidate of [hz * 2, hz / 2, hz * 3, hz / 3]) {
     if (Math.abs(centsBetween(candidate, tracked)) <= tolerance) {
       folded = candidate;
-      tripleFold = candidate === hz * 3;
+      tripleFold = candidate === hz * 3 || candidate === hz / 3;
       break;
     }
   }
@@ -2718,10 +2641,13 @@ function foldOctaveToTracked(hz, now) {
   // attack, and the previous onset test then folded every real B into E
   // forever, which is exactly the reported "B barely responds" on Android.
   if (tripleFold) {
-    // Fold up only when the low reading is a phantom: nothing is actually
-    // sounding down there, so it can only be a subharmonic of the tracked
-    // note. A genuinely sounding low note keeps its own reading.
-    if (lineStrength(hz) >= lineStrength(hz * 3) * CONFIG.tripleFoldLowRatio) {
+    const low = Math.min(hz, folded);
+    const lowIsReal = lineStrength(low) >= lineStrength(low * 3) * CONFIG.tripleFoldLowRatio;
+    const foldingDown = folded < hz;
+    // Folding down is right only when the low pitch is genuinely sounding
+    // (the high reading is then its third harmonic); folding up is right only
+    // when the low reading is a phantom subharmonic with nothing under it.
+    if (foldingDown !== lowIsReal) {
       octaveFoldRun = 0;
       return hz;
     }
@@ -2818,11 +2744,7 @@ function isAmbientAcquisition(hz, now) {
     now - lastStableAt <= 3000;
   const anchor = noteAlive && Number.isFinite(lastOnsetAt) ? lastOnsetAt : now;
   const from = anchor - 2500;
-  // Stop the window just short of the note's own attack: its own early
-  // readings must not count as "already present", but everything before them
-  // should. A wider gap left no history at all when the tuner had only been
-  // listening briefly, which let a room tone through about one time in three.
-  const to = anchor - 250;
+  const to = anchor - CONFIG.sustainedPitchMs - 200;
   const pre = ambientHistory.filter(
     (entry) =>
       entry.t >= from &&
