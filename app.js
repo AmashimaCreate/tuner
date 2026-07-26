@@ -210,6 +210,9 @@ const CONFIG = {
   // 60 cents), which is how a quiet pluck with no level jump gets in.
   sustainedPitchMs: 400,
   sustainedPitchFrames: 6,
+  // A far, un-plucked reading must carry at least this share of the tracked
+  // note's own narrow-line level before it is allowed to take the display.
+  takeoverDominance: 8,
   // A rescued reading must land within this of the comb-picked target.
   harmonicRescueRadiusCents: 150,
   // Rescue only after this many consecutive coarse failures: a mangled-mic
@@ -1118,7 +1121,11 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
       // Store the pitch's OWN narrow-line level, not the broadband rms: a
       // hand bump raises total rms without touching the hum's 98 Hz line.
       ambientHistory.push({ t: now, hz: rawHz, mag: lineStrength(rawHz) });
-      while (ambientHistory.length > 0 && ambientHistory[0].t < now - 2200) {
+      // Keep enough history to still see "before the note on screen started"
+      // late in that note's life: a 2.2 s window was already discarded by the
+      // time a 4 s sustain faded, so the test found nothing and let room
+      // content take the display. Cover the display-hold instead.
+      while (ambientHistory.length > 0 && ambientHistory[0].t < now - CONFIG.ambientHistoryMs) {
         ambientHistory.shift();
       }
     }
@@ -1139,8 +1146,31 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     octaveFoldRun = 0;
   }
 
+  // While a note is alive, a FAR reading may only take over if the signal says
+  // it is actually the louder note now. Low-frequency room content sits in the
+  // open-E band and simply outlasts a decaying string — measured: a sustained
+  // G3 handed the display to E2 after 4 s as its own level fell below a steady
+  // 85 Hz rumble. Requiring the newcomer's narrow line to dominate the note we
+  // are on fixes that without any timing rule: a real string change is either
+  // plucked (an onset exempts it) or replaces the old pitch outright, and a
+  // peg turn stays near the tracked pitch. Blanket blocks were tried before
+  // and broke legitimate transitions; this one is evidence-based.
+  let outrankedByTracked = false;
+  if (
+    basicUsable &&
+    trackingExistingPitch &&
+    !onsetRecent &&
+    Number.isFinite(pitchTracker.valueHz) &&
+    Math.abs(centsBetween(trackedHz, pitchTracker.valueHz)) > CONFIG.trackMaxStepCents
+  ) {
+    outrankedByTracked =
+      lineStrength(trackedHz) < lineStrength(pitchTracker.valueHz) * CONFIG.takeoverDominance;
+  }
+
   const signalUsable =
-    basicUsable && (trackingExistingPitch || onsetRecent || sustainedPitch);
+    basicUsable &&
+    (trackingExistingPitch || onsetRecent || sustainedPitch) &&
+    !outrankedByTracked;
   const octaveCorrected = signalUsable && trackedHz !== rawHz;
 
   const result = pitchTracker.update({
@@ -1158,7 +1188,7 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // exempt both by the recently-tracked check and by its level jump.
   if (
     result.accepted &&
-    result.event === "acquired" &&
+    (result.event === "acquired" || result.event === "switched") &&
     Number.isFinite(result.valueHz) &&
     isAmbientAcquisition(result.valueHz, now)
   ) {
@@ -2744,7 +2774,11 @@ function isAmbientAcquisition(hz, now) {
     now - lastStableAt <= 3000;
   const anchor = noteAlive && Number.isFinite(lastOnsetAt) ? lastOnsetAt : now;
   const from = anchor - 2500;
-  const to = anchor - CONFIG.sustainedPitchMs - 200;
+  // Stop the window just short of the note's own attack: its own early
+  // readings must not count as "already present", but everything before them
+  // should. A wider gap left no history at all when the tuner had only been
+  // listening briefly, which let a room tone through about one time in three.
+  const to = anchor - 250;
   const pre = ambientHistory.filter(
     (entry) =>
       entry.t >= from &&
