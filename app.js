@@ -420,6 +420,7 @@ let lastDisplayAt = null;
 let displayConfirmed = false;
 let onsetSamples = [];
 let onsetStart = null;
+let pendingNote = null;
 let filterPrevCents = null;
 let filterPrevSpeed = 0;
 let filterPrevAt = null;
@@ -1409,8 +1410,13 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       Math.abs(measuredCents - smoothedCents) <= CONFIG.reAcquireSnapCents;
     resetCentsFilter();
     displayConfirmed = instantRelock;
-    onsetSamples = [];
-    onsetStart = now;
+    // Re-acquiring the SAME note keeps what has been gathered: a weak string is
+    // acquired, lost and re-acquired every few frames, and clearing each time
+    // meant the buffer never held anything to commit.
+    if (midi !== previousMidi) {
+      onsetSamples = [];
+      onsetStart = now;
+    }
     // Seed the filter at the held value so the needle continues from where it
     // was instead of jumping to the raw attack reading.
     if (instantRelock) filterCents(smoothedCents, now);
@@ -1511,9 +1517,40 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   updateDebugPanel({ stableHz, midi, cents: smoothedCents });
 }
 
+// The settle check runs inside updateDisplay, which only runs on frames the
+// tracker accepts. A weak low string yields a couple of those a second, so the
+// timeout was never evaluated and the note letter showed with "·" and no
+// number for as long as the string rang. Finish the commit from the animation
+// loop instead, using whatever samples arrived.
+function commitStalledSettle(now) {
+  if (
+    displayConfirmed ||
+    pendingNote === null ||
+    onsetSamples.length === 0 ||
+    onsetStart === null ||
+    now - onsetStart < CONFIG.displaySettleMaxMs
+  ) {
+    return;
+  }
+  const sorted = [...onsetSamples].sort(numberAscending);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  resetCentsFilter();
+  smoothedCents = filterCents(median, now);
+  displayConfirmed = true;
+  displayedCentsInt = Math.round(smoothedCents);
+  elements.gaugeCents.textContent = formatBubbleCents(displayedCentsInt);
+  renderGaugeValue(clamp(smoothedCents, -CONFIG.meterRangeCents, CONFIG.meterRangeCents));
+  elements.pitchMeter.setAttribute("aria-valuenow", smoothedCents.toFixed(1));
+  elements.pitchMeter.setAttribute(
+    "aria-valuetext",
+    `${pendingNote.noteName}${pendingNote.octave}、${formatCents(displayedCentsInt)}`,
+  );
+}
+
 // Shown while a fresh note is still settling: the note letter is known, but the
 // needle is held blank so an attack transient never appears on the meter.
 function renderConfirmingDisplay(noteName, octave) {
+  pendingNote = { noteName, octave };
   elements.gaugeNote.textContent = noteName;
   elements.gaugeOctave.textContent = String(octave);
   elements.gaugeCents.textContent = "·";
@@ -2048,6 +2085,7 @@ function clearPitchHistory({ clearStableValue }) {
   chromaticHeldMidi = null;
   displayConfirmed = false;
   onsetSamples = [];
+  pendingNote = null;
   smoothedCents = null;
   lastDisplayAt = null;
   displayTuned = false;
@@ -2132,6 +2170,7 @@ function laneX(cents) {
 
 
 function animateBubble(now) {
+  commitStalledSettle(now);
   if (bubbleTargetPosition === null) {
     if (bubblePosition !== null) {
       bubblePosition = null;
@@ -2184,6 +2223,7 @@ function renderNoTargetDisplay() {
   smoothedCents = null;
   displayConfirmed = false;
   onsetSamples = [];
+  pendingNote = null;
   lastDisplayAt = null;
   elements.gaugeNote.textContent = "—";
   elements.gaugeOctave.textContent = "";
