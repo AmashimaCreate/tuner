@@ -163,6 +163,10 @@ const CONFIG = {
   referenceToneMs: 1400,
   midiA4: 69,
   stringMatchMaxCents: 600,
+  // A manual string lock releases when the sound sustains this far from the
+  // locked string while matching another one far better.
+  manualReleaseCents: 250,
+  manualReleaseMs: 700,
   // Octave correction. At a hard attack the detector can lock an octave below
   // the played note (a subharmonic key maximum transiently wins), so a plucked
   // B3 briefly reads as ~124 Hz and the display jumps a whole octave. A real
@@ -191,6 +195,14 @@ const CONFIG = {
   // and 2 frames of protection let it switch to E. A genuine E played right
   // after B sustains far past this and still switches, just ~0.2s later.
   octaveTripleFoldMaxRun: 8,
+  // A x3 fold is accepted only when the low member of the pair carries at
+  // least this share of the high member's narrow-line level — i.e. the low
+  // frequency is really sounding rather than being a phantom subharmonic.
+  // Measured separation is enormous: a decaying B3's phantom 82.3 Hz sits at
+  // 1e-5 of its fundamental, while a genuinely sounding low E is at 0.7 even
+  // through a mic that guts its fundamental. The threshold sits far below the
+  // genuine side so a mangled low E is never mistaken for a phantom.
+  tripleFoldLowRatio: 0.02,
   // No note may begin without an attack: acquisition requires an RMS onset
   // within this window. (Switching between notes while tracking is exempt.)
   onsetAcquireWindowMs: 1000,
@@ -424,6 +436,7 @@ let targetsMidi = [];
 let targetsHz = [];
 let autoString = -1;
 let manualString = null;
+let manualMismatchSince = null;
 let headstockType = "three-three";
 let leftHanded = false;
 let soundEnabled = true;
@@ -1252,6 +1265,35 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
     targetHz = concertAHz * 2 ** ((midi - CONFIG.midiA4) / 12);
   } else {
     if (reselectString) reselectFramesLeft = CONFIG.reselectFrames;
+
+    // Release a manual lock the player has plainly moved away from. Tapping a
+    // peg both sounds its reference tone and locks that string, so it is easy
+    // to leave a lock behind and then wonder why another string pins the
+    // needle at the end of the lane. Requires a large, sustained mismatch and
+    // a much better match elsewhere, so tuning a badly detuned string against
+    // its own peg is untouched.
+    if (manualString !== null) {
+      const lockedCents = Math.abs(centsBetween(stableHz, targetsHz[manualString]));
+      const nearest = nearestStringIndex(stableHz, targetsHz, CONFIG.stringMatchMaxCents);
+      const clearlyElsewhere =
+        nearest >= 0 &&
+        nearest !== manualString &&
+        lockedCents > CONFIG.manualReleaseCents &&
+        Math.abs(centsBetween(stableHz, targetsHz[nearest])) < lockedCents / 2;
+      manualMismatchSince = clearlyElsewhere ? manualMismatchSince ?? now : null;
+      if (
+        manualMismatchSince !== null &&
+        now - manualMismatchSince >= CONFIG.manualReleaseMs
+      ) {
+        manualString = null;
+        manualMismatchSince = null;
+        autoString = -1;
+        reselectFramesLeft = CONFIG.reselectFrames;
+        renderHeadstock();
+      }
+    } else {
+      manualMismatchSince = null;
+    }
 
     // Invalid-sample guard: a pitch that matches NO string (a gate wisp at
     // e.g. 509 Hz) is not a note the player can be tuning. Blanking the held
@@ -2164,6 +2206,7 @@ function onPegTap(index) {
   }
 
   manualString = manualString === index ? null : index;
+  manualMismatchSince = null;
   autoString = -1;
   resetChime();
   resetDetectionData();
@@ -2566,6 +2609,27 @@ function foldOctaveToTracked(hz, now) {
       folded = candidate;
       tripleFold = candidate === hz * 3 || candidate === hz / 3;
       break;
+    }
+  }
+
+  // The x3 family is decided by the spectrum, not by timing. In standard
+  // tuning E2 x3 = 247.2 Hz is the open B3 (1.8 cents apart!), so "a decaying
+  // B3 misread at its third subharmonic" and "a real B3 played while the low
+  // E was tracked" produce the same pair of numbers. The signal tells them
+  // apart: only one of the two has energy at the LOW frequency itself.
+  // Timing cannot do this — a phone's automatic gain control flattens the
+  // attack, and the previous onset test then folded every real B into E
+  // forever, which is exactly the reported "B barely responds" on Android.
+  if (tripleFold) {
+    const low = Math.min(hz, folded);
+    const lowIsReal = lineStrength(low) >= lineStrength(low * 3) * CONFIG.tripleFoldLowRatio;
+    const foldingDown = folded < hz;
+    // Folding down is right only when the low pitch is genuinely sounding
+    // (the high reading is then its third harmonic); folding up is right only
+    // when the low reading is a phantom subharmonic with nothing under it.
+    if (foldingDown !== lowIsReal) {
+      octaveFoldRun = 0;
+      return hz;
     }
   }
 

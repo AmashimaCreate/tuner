@@ -354,6 +354,16 @@
         border-width: 3px;
       }
 
+      /* The ring is hidden in the inline layouts, so mark the lock on the
+         label itself — otherwise a locked string is invisible there. */
+      .peg.is-manual .peg-label {
+        border-width: 3px;
+        border-color: var(--measure-color);
+        box-shadow:
+          0 0 0 3px color-mix(in srgb, var(--measure-color) 26%, transparent),
+          0 0 14px color-mix(in srgb, var(--measure-color) 34%, transparent);
+      }
+
       /* While the tapped string's reference tone rings, its peg pulses. */
       .peg.is-playing .peg-label {
         color: var(--accent);
