@@ -2654,10 +2654,17 @@ function foldOctaveToTracked(hz, now) {
   const tolerance = CONFIG.octaveFoldToleranceCents;
   let folded = hz;
   let tripleFold = false;
-  for (const candidate of [hz * 2, hz / 2, hz * 3, hz / 3]) {
+  // The x3 family folds UP only. Folding a reading DOWN onto a note three
+  // times below it cannot be told from the player simply playing that note —
+  // B3 is the open E's third harmonic to within 2 cents — so a real B plucked
+  // while the low E rang could be folded into E and, because the interleaved
+  // E readings keep resetting the run counter, never released. Folding up is
+  // the case this was built for (a decaying string misread at its own third
+  // subharmonic) and stays.
+  for (const candidate of [hz * 2, hz / 2, hz * 3]) {
     if (Math.abs(centsBetween(candidate, tracked)) <= tolerance) {
       folded = candidate;
-      tripleFold = candidate === hz * 3 || candidate === hz / 3;
+      tripleFold = candidate === hz * 3;
       break;
     }
   }
@@ -2671,13 +2678,10 @@ function foldOctaveToTracked(hz, now) {
   // attack, and the previous onset test then folded every real B into E
   // forever, which is exactly the reported "B barely responds" on Android.
   if (tripleFold) {
-    const low = Math.min(hz, folded);
-    const lowIsReal = lineStrength(low) >= lineStrength(low * 3) * CONFIG.tripleFoldLowRatio;
-    const foldingDown = folded < hz;
-    // Folding down is right only when the low pitch is genuinely sounding
-    // (the high reading is then its third harmonic); folding up is right only
-    // when the low reading is a phantom subharmonic with nothing under it.
-    if (foldingDown !== lowIsReal) {
+    // Fold up only when the low reading is a phantom: nothing is actually
+    // sounding down there, so it can only be a subharmonic of the tracked
+    // note. A genuinely sounding low note keeps its own reading.
+    if (lineStrength(hz) >= lineStrength(hz * 3) * CONFIG.tripleFoldLowRatio) {
       octaveFoldRun = 0;
       return hz;
     }
