@@ -206,6 +206,10 @@ const CONFIG = {
   // No note may begin without an attack: acquisition requires an RMS onset
   // within this window. (Switching between notes while tracking is exempt.)
   onsetAcquireWindowMs: 1000,
+  // ...or the pitch simply held steady this long (this many frames within
+  // 60 cents), which is how a quiet pluck with no level jump gets in.
+  sustainedPitchMs: 400,
+  sustainedPitchFrames: 6,
   // A rescued reading must land within this of the comb-picked target.
   harmonicRescueRadiusCents: 150,
   // Rescue only after this many consecutive coarse failures: a mangled-mic
@@ -1091,6 +1095,21 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
   // signals with no attack must never acquire. Switches from a tracked note
   // are unaffected.
   const onsetRecent = now - lastOnsetAt <= CONFIG.onsetAcquireWindowMs;
+  // An attack is not the only proof that a note started. A quiet pluck in a
+  // room with any noise floor raises the level by well under the onset
+  // ratio — measured: the detector reported the right pitch at clarity 0.9
+  // while the level rose only 1.2x, and the tuner sat idle. That reads as
+  // "poor microphone sensitivity" when detection was never the problem. So
+  // also accept a pitch that has simply been THERE, steadily, for a moment;
+  // the ambient test below still rejects room tones that were already
+  // sounding before it, which is what the onset gate was really protecting.
+  const sustainedPitch =
+    rawInRange &&
+    ambientHistory.filter(
+      (entry) =>
+        now - entry.t <= CONFIG.sustainedPitchMs &&
+        Math.abs(centsBetween(entry.hz, rawHz)) <= 60,
+    ).length >= CONFIG.sustainedPitchFrames;
   const basicUsable = rawInRange && Number.isFinite(rms) && rms >= rmsMin;
 
   if (rawInRange) {
@@ -1120,7 +1139,8 @@ function processTrackerFrame(now, { rawHz, clarity, rms, folded = false, refined
     octaveFoldRun = 0;
   }
 
-  const signalUsable = basicUsable && (trackingExistingPitch || onsetRecent);
+  const signalUsable =
+    basicUsable && (trackingExistingPitch || onsetRecent || sustainedPitch);
   const octaveCorrected = signalUsable && trackedHz !== rawHz;
 
   const result = pitchTracker.update({
@@ -2712,8 +2732,19 @@ function isAmbientAcquisition(hz, now) {
   ) {
     return false;
   }
-  const from = lastOnsetAt - 1800;
-  const to = lastOnsetAt - 60;
+  // The question is always "was this pitch already sounding before the note
+  // currently on screen began?". While a note is alive, that means looking
+  // back before ITS attack, however long ago that was — otherwise a room tone
+  // simply outlasts the window and takes the display over as the note fades.
+  // With nothing on screen (a quiet pluck from silence, which may have no
+  // attack at all) look back from now instead.
+  const noteAlive =
+    pitchTracker.state === PITCH_TRACKER_STATES.TRACKING ||
+    pitchTracker.state === PITCH_TRACKER_STATES.RELEASE ||
+    now - lastStableAt <= 3000;
+  const anchor = noteAlive && Number.isFinite(lastOnsetAt) ? lastOnsetAt : now;
+  const from = anchor - 2500;
+  const to = anchor - CONFIG.sustainedPitchMs - 200;
   const pre = ambientHistory.filter(
     (entry) =>
       entry.t >= from &&
