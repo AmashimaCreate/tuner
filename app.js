@@ -266,22 +266,47 @@ const HEADSTOCK_TYPES = {
     label: "4対3",
     image: "./assets/headstock-ebony-no-strings.png",
     pegLayout: [
-      { x: 16, y: 70, side: "left" },
-      { x: 16, y: 52, side: "left" },
-      { x: 16, y: 34, side: "left" },
-      { x: 16, y: 16, side: "left" },
+      { x: 16, y: 59, side: "left" },
+      { x: 16, y: 46, side: "left" },
+      { x: 16, y: 33, side: "left" },
+      { x: 16, y: 20, side: "left" },
       { x: 84, y: 22, side: "right" },
-      { x: 84, y: 42, side: "right" },
-      { x: 84, y: 62, side: "right" },
+      { x: 84, y: 38, side: "right" },
+      { x: 84, y: 54, side: "right" },
     ],
+    // The photo only has three posts a side, so the bass side fits four
+    // evenly spaced ends into the same span the three posts occupy.
     stringLayout: [
-      [[330, 1672], [330, 1390], [318, 1120]],
-      [[368, 1672], [368, 1390], [323, 892]],
-      [[406, 1672], [406, 1390], [323, 635]],
-      [[444, 1672], [444, 1390], [323, 374]],
-      [[482, 1672], [482, 1390], [612, 374]],
-      [[520, 1672], [520, 1390], [612, 635]],
-      [[558, 1672], [558, 1390], [612, 892]],
+      [[351, 1672], [351, 1390], [323, 892]],
+      [[389, 1672], [389, 1390], [323, 719]],
+      [[426, 1672], [426, 1390], [323, 547]],
+      [[464, 1672], [464, 1390], [323, 374]],
+      [[501, 1672], [501, 1390], [612, 374]],
+      [[539, 1672], [539, 1390], [612, 635]],
+      [[576, 1672], [576, 1390], [612, 892]],
+    ],
+  },
+  "seven-inline": {
+    label: "7連",
+    image: "./assets/headstock-six-inline.png",
+    pegLayout: [
+      { x: 22, y: 83, side: "left" },
+      { x: 22, y: 71.75, side: "left" },
+      { x: 22, y: 60.5, side: "left" },
+      { x: 22, y: 49.25, side: "left" },
+      { x: 22, y: 38, side: "left" },
+      { x: 22, y: 26.75, side: "left" },
+      { x: 22, y: 15.5, side: "left" },
+    ],
+    // Same post run as the six-inline photo, seven ends spaced along it.
+    stringLayout: [
+      [[351, 1672], [365, 1410], [339, 1055]],
+      [[389, 1672], [399, 1410], [363, 938]],
+      [[426, 1672], [433, 1410], [386, 822]],
+      [[464, 1672], [468, 1410], [410, 705]],
+      [[501, 1672], [502, 1410], [433, 588]],
+      [[539, 1672], [536, 1410], [457, 472]],
+      [[576, 1672], [570, 1410], [480, 355]],
     ],
   },
   "six-inline": {
@@ -2525,10 +2550,12 @@ function mirrorX(x, width = 220) {
 }
 
 function renderHeadstockLayout() {
-  // A seven-string tuning always uses the dedicated 4+3 layout; the stored
-  // 3対3/6連 preference applies to six-string tunings only.
+  // A seven-string tuning uses the seven-string layout that matches the
+  // stored 3対3/6連 preference.
   const stringCount = currentTuning.notes?.length ?? 6;
-  const effectiveType = stringCount === 7 ? "seven" : headstockType;
+  const effectiveType = stringCount === 7
+    ? headstockType === "six-inline" ? "seven-inline" : "seven"
+    : headstockType;
   const type = HEADSTOCK_TYPES[effectiveType];
   elements.headstock.dataset.type = effectiveType;
   elements.headstock.dataset.leftHanded = String(leftHanded);
@@ -2548,11 +2575,17 @@ function renderHeadstockLayout() {
       : layout.side;
   }
 
+  // The lowest half of the strings are wound, the rest plain — which string
+  // that is depends on how many there are, so it cannot live in the markup.
+  const woundCount = Math.ceil(stringCount / 2);
   for (const stringLine of elements.headstock.querySelectorAll(".string-line")) {
     const index = Number(stringLine.dataset.i);
     const points = type.stringLayout[index];
-    stringLine.hidden = !points;
+    // SVG elements have no `hidden` IDL property — set the attribute itself.
+    stringLine.toggleAttribute("hidden", !points);
     if (!points) continue;
+    stringLine.classList.toggle("is-wound", index < woundCount);
+    stringLine.classList.toggle("is-plain", index >= woundCount);
     const path = points.map(([x, y], pointIndex) => {
       const command = pointIndex === 0 ? "M" : "L";
       return `${command}${mirrorX(x, HEADSTOCK_VIEWBOX_WIDTH)} ${y}`;

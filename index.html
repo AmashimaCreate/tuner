@@ -244,6 +244,14 @@
       .headstock[data-type="seven"] .string-line[data-i="3"] { stroke-width: 1.6; }
       .headstock[data-type="seven"] .string-line[data-i="4"] { stroke-width: 1.35; }
       .headstock[data-type="seven"] .string-line[data-i="5"] { stroke-width: 1.15; }
+      .headstock[data-type="seven"] .string-line[data-i="6"] { stroke-width: 1; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="0"] { stroke-width: 2.3; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="1"] { stroke-width: 2.05; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="2"] { stroke-width: 1.85; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="3"] { stroke-width: 1.6; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="4"] { stroke-width: 1.35; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="5"] { stroke-width: 1.15; }
+      .headstock[data-type="seven-inline"] .string-line[data-i="6"] { stroke-width: 1; }
 
       .string-line.is-active {
         stroke: var(--measure-color);
@@ -282,8 +290,24 @@
       }
 
       .headstock[data-type="six-inline"] .peg-ring,
-      .headstock[data-type="seven"] .peg-ring {
+      .headstock[data-type="seven"] .peg-ring,
+      .headstock[data-type="seven-inline"] .peg-ring {
         display: none;
+      }
+
+      .headstock[data-type="seven-inline"][data-left-handed="true"] .headstock-image {
+        transform: scaleX(-1);
+      }
+
+      /* Seven in a row need slightly smaller targets to stay separated. */
+      .headstock[data-type="seven-inline"] .peg,
+      .headstock[data-type="seven-inline"] .peg-label {
+        width: 50px;
+        height: 50px;
+      }
+
+      .headstock[data-type="seven-inline"] .peg-label {
+        font-size: 15px;
       }
 
       .headstock[data-type="six-inline"] .peg:focus-visible {
@@ -483,7 +507,7 @@
 
       .gauge-end-label {
         fill: rgb(255 255 255 / 38%);
-        font-size: 14px;
+        font-size: 19px;
         font-weight: 700;
         text-anchor: middle;
         dominant-baseline: middle;
