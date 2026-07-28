@@ -52,13 +52,15 @@ export const REFERENCE_HOLD_RATIO = 0.75;
 // never reach 0.75 of it, so the low E stopped holding at all.
 //
 // It is judged that way ONLY while the tracked pitch is at or below the low E,
-// the one place the artifact was measured to outrank a real peak. Relaxing it
-// for every reference stalls string changes: E4 is the low E's 4th harmonic,
-// so a plucked low E always offers an E4-shaped candidate, and a wider gate
-// let the hold latch it for ~2.4 s (three runs in five, G3 -> E2 and
-// E4 -> E2). Bounding it by reference frequency removes that case by
-// construction — while a higher string is tracked, this file behaves
-// bit-for-bit as before.
+// the one place the artifact was measured to outrank a real peak, and only
+// once the note is past its attack (options.pastAttack). Relaxing it for every
+// reference stalls string changes: E4 is the low E's 4th harmonic, so a
+// plucked low E always offers an E4-shaped candidate, and a wider gate let the
+// hold latch it for ~2.4 s (three runs in five, G3 -> E2 and E4 -> E2).
+// Relaxing it during the attack costs pluck response for no gain — the true
+// peak is at its strongest there and never needed the help. Between them the
+// two bounds mean that everything except a decaying low string behaves
+// bit-for-bit as it did before.
 const SUPPORTED_LAG_FRACTION = 0.5;
 const SUPPORTED_LAG_MAX_REFERENCE_HZ = 100;
 
@@ -132,9 +134,10 @@ export class GuitarPitchAnalyzer {
    * when no candidate falls inside [minHz, maxHz]. candidates lists every
    * NSDF key maximum as { hz, lag, value } in ascending lag order for
    * diagnostics. Pass the currently tracked pitch as options.referenceHz to
-   * prefer continuity over the global pick (held: true in the result).
+   * prefer continuity over the global pick (held: true in the result), and
+   * options.pastAttack when the note is no longer in its attack.
    */
-  analyze(frame, sampleRate, { referenceHz = null } = {}) {
+  analyze(frame, sampleRate, { referenceHz = null, pastAttack = false } = {}) {
     this._computeNsdf(frame);
     const candidates = collectKeyMaxima(this._nsdf).map(({ lag, value }) => ({
       hz: sampleRate / lag,
@@ -160,7 +163,7 @@ export class GuitarPitchAnalyzer {
     // in the candidate list, so the pick, the octave fold and the range check
     // are unchanged and no new frequency becomes reportable.
     let holdReference = strongest;
-    if (Number.isFinite(referenceHz) && referenceHz > 0 &&
+    if (pastAttack && Number.isFinite(referenceHz) && referenceHz > 0 &&
         referenceHz <= SUPPORTED_LAG_MAX_REFERENCE_HZ) {
       const supportedLagMax = this._nsdf.length * SUPPORTED_LAG_FRACTION;
       let strongestSupported = 0;
