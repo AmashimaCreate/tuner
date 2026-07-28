@@ -39,6 +39,30 @@ export const REFERENCE_RADIUS_CENTS = 150;
 // collapses against the new one and holding stops within a frame or two.
 export const REFERENCE_HOLD_RATIO = 0.75;
 
+// The NSDF is normalised by the energy of the OVERLAP alone, so its
+// denominator shrinks toward zero as the lag approaches the window length: a
+// key maximum in the last part of the buffer is computed from a handful of
+// samples and lands near 1.0 on plain noise. McLeod evaluates the NSDF only
+// for lags up to half the window for exactly this reason.
+//
+// This matters because the hold gate above is RELATIVE. Measured on this
+// player's low-E captures, the strongest key maximum of the frame sits beyond
+// half the window on 95% of live frames — its "period" is 25 Hz in a 2048
+// frame and 5.5 Hz in an 8192 one, values the analyzer would never report —
+// and the low E's true-period maximum (0.28-0.47 through the decay) can then
+// never reach 0.75 of it. The low E therefore stopped locking at all: over the
+// note-active frames of the two low-E captures the hold fired on 6% and 21%
+// of frames, against 97% for the G3 control.
+//
+// Maxima past this fraction stay in the candidate list, so the pick, the
+// octave fold and the range check are all bit-for-bit unchanged and no new
+// frequency becomes reportable. They simply no longer define what "strong"
+// means. Measured effect on the hold: 35%/40%/97%/77%/70% of note-active
+// frames (low-E sustain / low-E plucks / G3 / E4 / A2) against
+// 6%/21%/97%/74%/64%, with no held frame landing more than 100 cents from
+// the string on any capture.
+const SUPPORTED_LAG_FRACTION = 0.5;
+
 /**
  * MPM-style pitch detector for guitar with explicit octave disambiguation.
  *
@@ -131,6 +155,18 @@ export class GuitarPitchAnalyzer {
       if (candidate.value > strongest) strongest = candidate.value;
     }
 
+    // The same reference measured over the part of the buffer where the NSDF
+    // still has real support (see SUPPORTED_LAG_FRACTION); only the hold gate
+    // uses it. A window too short to hold one supported period cannot be
+    // judged this way, so fall back to the original reference.
+    const supportedLagMax = this._nsdf.length * SUPPORTED_LAG_FRACTION;
+    let strongestSupported = 0;
+    for (const candidate of candidates) {
+      if (candidate.lag > supportedLagMax) break;
+      if (candidate.value > strongestSupported) strongestSupported = candidate.value;
+    }
+    const holdReference = strongestSupported > 0 ? strongestSupported : strongest;
+
     // Candidates are in ascending lag order, so find() takes the smallest lag
     // (highest frequency) that clears the relative threshold.
     let pick = candidates.find(
@@ -162,7 +198,7 @@ export class GuitarPitchAnalyzer {
         nearest !== null &&
         nearest.lag <= pick.lag &&
         Math.abs(centsBetween(nearest.hz, referenceHz)) <= this._referenceRadiusCents &&
-        nearest.value >= this._referenceHoldRatio * strongest
+        nearest.value >= this._referenceHoldRatio * holdReference
       ) {
         return {
           hz: nearest.hz,
