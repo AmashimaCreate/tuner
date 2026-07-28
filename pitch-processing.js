@@ -39,6 +39,29 @@ export const REFERENCE_RADIUS_CENTS = 150;
 // collapses against the new one and holding stops within a frame or two.
 export const REFERENCE_HOLD_RATIO = 0.75;
 
+// The NSDF is normalised by the energy of the OVERLAP alone, so its
+// denominator shrinks toward zero as the lag approaches the window length: a
+// key maximum in the last part of the buffer is computed from a handful of
+// samples and lands near 1.0 on plain noise. McLeod evaluates the NSDF only
+// for lags up to half the window for exactly this reason.
+//
+// That artificial maximum sets the bar for the RELATIVE hold gate above.
+// Measured on this player's captures with this analyzer, it sits beyond half
+// the window on 88-92% of live low-E frames — a "period" of 25 Hz in a 2048
+// frame — and the low E's own maximum (0.28-0.47 through the decay) can then
+// never reach 0.75 of it, so the low E stopped holding at all.
+//
+// It is judged that way ONLY while the tracked pitch is at or below the low E,
+// the one place the artifact was measured to outrank a real peak. Relaxing it
+// for every reference stalls string changes: E4 is the low E's 4th harmonic,
+// so a plucked low E always offers an E4-shaped candidate, and a wider gate
+// let the hold latch it for ~2.4 s (three runs in five, G3 -> E2 and
+// E4 -> E2). Bounding it by reference frequency removes that case by
+// construction — while a higher string is tracked, this file behaves
+// bit-for-bit as before.
+const SUPPORTED_LAG_FRACTION = 0.5;
+const SUPPORTED_LAG_MAX_REFERENCE_HZ = 100;
+
 /**
  * MPM-style pitch detector for guitar with explicit octave disambiguation.
  *
@@ -131,6 +154,23 @@ export class GuitarPitchAnalyzer {
       if (candidate.value > strongest) strongest = candidate.value;
     }
 
+    // The same reference measured over the part of the buffer where the NSDF
+    // still has real support (see SUPPORTED_LAG_FRACTION); only the hold gate
+    // uses it, and only for a low tracked pitch. Maxima past that point stay
+    // in the candidate list, so the pick, the octave fold and the range check
+    // are unchanged and no new frequency becomes reportable.
+    let holdReference = strongest;
+    if (Number.isFinite(referenceHz) && referenceHz > 0 &&
+        referenceHz <= SUPPORTED_LAG_MAX_REFERENCE_HZ) {
+      const supportedLagMax = this._nsdf.length * SUPPORTED_LAG_FRACTION;
+      let strongestSupported = 0;
+      for (const candidate of candidates) {
+        if (candidate.lag > supportedLagMax) break;
+        if (candidate.value > strongestSupported) strongestSupported = candidate.value;
+      }
+      if (strongestSupported > 0) holdReference = strongestSupported;
+    }
+
     // Candidates are in ascending lag order, so find() takes the smallest lag
     // (highest frequency) that clears the relative threshold.
     let pick = candidates.find(
@@ -162,7 +202,7 @@ export class GuitarPitchAnalyzer {
         nearest !== null &&
         nearest.lag <= pick.lag &&
         Math.abs(centsBetween(nearest.hz, referenceHz)) <= this._referenceRadiusCents &&
-        nearest.value >= this._referenceHoldRatio * strongest
+        nearest.value >= this._referenceHoldRatio * holdReference
       ) {
         return {
           hz: nearest.hz,
