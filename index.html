@@ -841,6 +841,30 @@
         font-weight: 740;
       }
 
+      /* Same shell as a settings row, but it leaves the app, so it says so. */
+      .settings-link {
+        font-weight: 740;
+        text-decoration: none;
+      }
+
+      .settings-link:hover .settings-link-hint,
+      .settings-link:focus-visible .settings-link-hint {
+        color: var(--accent);
+      }
+
+      .settings-link-hint {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 0.82rem;
+        font-weight: 700;
+        transition: color 120ms ease;
+      }
+
+      .settings-link:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 3px;
+      }
+
       .toggle-control {
         flex: 0 0 auto;
         display: flex;
@@ -1218,6 +1242,15 @@
               <button type="button" id="hz-up" class="stepper-button" aria-label="基準ピッチを上げる">＋</button>
             </div>
           </div>
+          <a
+            class="settings-row settings-link"
+            href="https://amashimacreate.github.io/web-tuning-fork/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span>Web音叉</span>
+            <span class="settings-link-hint">別タブで開く ↗</span>
+          </a>
         </div>
       </div>
     </dialog>
