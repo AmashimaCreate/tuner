@@ -206,6 +206,12 @@ const CONFIG = {
   // No note may begin without an attack: acquisition requires an RMS onset
   // within this window. (Switching between notes while tracking is exempt.)
   onsetAcquireWindowMs: 1000,
+  // A permission sheet the user never answers, or a device another app is
+  // holding, leaves getUserMedia pending forever. Without a deadline the
+  // button stays disabled on 待機中… with no way back but a reload — measured
+  // still stuck after 10 s. Long enough that answering a real prompt is never
+  // cut short.
+  microphoneRequestTimeoutMs: 30000,
   // ...or the pitch simply held steady this long (this many frames within
   // 60 cents), which is how a quiet pluck with no level jump gets in.
   sustainedPitchMs: 400,
@@ -705,7 +711,7 @@ async function startMicrophoneFromGesture() {
     nextContext = new AudioContextClass();
     nextContext.onstatechange = updateDebugPanel;
     await resumeAudioContext(nextContext);
-    nextStream = await navigator.mediaDevices.getUserMedia(GET_USER_MEDIA_CONSTRAINTS);
+    nextStream = await requestMicrophoneStream(GET_USER_MEDIA_CONSTRAINTS);
 
     // A Bluetooth headset microphone runs in hands-free mode: telephone-band
     // sample rate, in-headset noise gating, and a high-pass that guts the low
@@ -2985,7 +2991,39 @@ function showInitialEnvironmentError() {
   }
 }
 
+// getUserMedia with a deadline (see CONFIG.microphoneRequestTimeoutMs). A
+// request that lands after the deadline is shut down rather than left holding
+// the microphone open with nothing listening.
+async function requestMicrophoneStream(constraints) {
+  const request = navigator.mediaDevices.getUserMedia(constraints);
+  let timer = null;
+  try {
+    return await Promise.race([
+      request,
+      new Promise((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new DOMException("microphone request timed out", "TimeoutError")),
+          CONFIG.microphoneRequestTimeoutMs,
+        );
+      }),
+    ]);
+  } catch (error) {
+    request.then(
+      (stream) => {
+        for (const track of stream.getTracks()) track.stop();
+      },
+      () => {},
+    );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function getMicrophoneErrorMessage(error) {
+  if (error?.name === "TimeoutError") {
+    return "マイクの応答がありません。もう一度お試しください";
+  }
   if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
     return "マイクの使用を許可してください";
   }
