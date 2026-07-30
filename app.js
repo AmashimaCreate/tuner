@@ -216,6 +216,16 @@ const CONFIG = {
   // analyzer's low-string hold relaxation is withheld until this has passed,
   // so plucking is judged exactly as it was before that relaxation existed.
   attackWindowMs: 250,
+  // The attack of a wound low string reads sharp twice over: the string itself
+  // is momentarily tense, and the NSDF leans on the loud high partials, which
+  // inharmonicity stretches sharp — measured on this player's takes, the first
+  // committed number sat about +20 cents and then slid down for over a second.
+  // So on the low strings the display treats the attack the way the analyzer
+  // already does (see attackWindowMs): those frames neither seed the settle
+  // nor move an already-showing needle. A peg turn produces no onset, so
+  // tracking is untouched; the cost is only that the low strings' number
+  // appears one attack-window later.
+  lowAttackDisplayMaxTargetHz: 100,
   // ...or the pitch simply held steady this long (this many frames within
   // 60 cents), which is how a quiet pluck with no level jump gets in.
   sustainedPitchMs: 400,
@@ -1404,6 +1414,13 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   // once they hold within displaySettleSpreadCents for displaySettleMs. A brief
   // attack transient never gathers a settled window, so it is neither shown nor
   // latched — the needle simply appears already on the right value.
+  // Attack frames on a low string are not display material (see
+  // lowAttackDisplayMaxTargetHz). While one is in progress, keep gathering
+  // nothing and keep the needle where it is.
+  const lowAttackActive =
+    targetHz <= CONFIG.lowAttackDisplayMaxTargetHz &&
+    now - lastOnsetAt <= CONFIG.attackWindowMs;
+
   if (reselectString || midi !== previousMidi) {
     // Instant relock: a re-pluck of the note already on screen, reading close
     // to the held value, needs no settle window — a device noise gate chops a
@@ -1431,6 +1448,15 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
   lastDisplayAt = now;
 
   if (!displayConfirmed) {
+    if (lowAttackActive) {
+      // Restart the settle window at the attack's edge so the median is made
+      // of post-attack readings only.
+      onsetSamples = [];
+      onsetStart = now;
+      renderConfirmingDisplay(noteName, octave);
+      updateDebugPanel({ stableHz, midi, cents: Number.NaN });
+      return;
+    }
     onsetSamples.push(measuredCents);
     if (onsetSamples.length > 12) onsetSamples.shift();
     const spread = Math.max(...onsetSamples) - Math.min(...onsetSamples);
@@ -1452,9 +1478,11 @@ function updateDisplay(stableHz, now, { reselectString = false, refinedHz = Numb
       updateDebugPanel({ stableHz, midi, cents: Number.NaN });
       return;
     }
-  } else {
+  } else if (!lowAttackActive) {
     smoothedCents = filterCents(measuredCents, now);
   }
+  // else: a low string's attack while a number is showing — hold the needle;
+  // the filter resumes from the held value once the attack window has passed.
 
   const gaugeCents = clamp(
     smoothedCents,
