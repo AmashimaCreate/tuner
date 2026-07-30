@@ -250,7 +250,7 @@ const HEADSTOCK_VIEWBOX_WIDTH = 941;
 const HEADSTOCK_TYPES = {
   "three-three": {
     label: "3対3",
-    image: "./assets/headstock-ebony-no-strings.png",
+    image: "./assets/headstock-ebony-no-strings.webp",
     pegLayout: [
       { x: 16, y: 54, side: "left" },
       { x: 16, y: 38, side: "left" },
@@ -270,7 +270,7 @@ const HEADSTOCK_TYPES = {
   },
   seven: {
     label: "4対3",
-    image: "./assets/headstock-ebony-no-strings.png",
+    image: "./assets/headstock-ebony-no-strings.webp",
     pegLayout: [
       { x: 16, y: 59, side: "left" },
       { x: 16, y: 46, side: "left" },
@@ -294,7 +294,7 @@ const HEADSTOCK_TYPES = {
   },
   "seven-inline": {
     label: "7連",
-    image: "./assets/headstock-six-inline.png",
+    image: "./assets/headstock-six-inline.webp",
     pegLayout: [
       { x: 22, y: 83, side: "left" },
       { x: 22, y: 71.75, side: "left" },
@@ -317,7 +317,7 @@ const HEADSTOCK_TYPES = {
   },
   "six-inline": {
     label: "6連",
-    image: "./assets/headstock-six-inline.png",
+    image: "./assets/headstock-six-inline.webp",
     pegLayout: [
       { x: 22, y: 83, side: "left" },
       { x: 22, y: 69.5, side: "left" },
@@ -3244,4 +3244,12 @@ function formatDebugSwitch(value) {
   if (value === true) return "on";
   if (value === false) return "off";
   return "?";
+}
+
+// Installable offline copy. Network-first (see sw.js), so online behaviour —
+// including picking up a fresh deploy — is unchanged.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
 }
