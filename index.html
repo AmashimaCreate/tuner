@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
     >
     <meta name="theme-color" content="#090d12">
     <meta
@@ -681,16 +681,16 @@
       }
 
       .error-message {
+        min-width: 0;
         min-height: 18px;
         margin: 0;
-        overflow: hidden;
         color: var(--danger);
         font-size: 0.76rem;
         font-weight: 650;
-        line-height: 18px;
+        line-height: 1.35;
         text-align: center;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: anywhere;
+        text-wrap: balance;
       }
 
       /* Input-quality warnings share the banner but must not read as failures. */
@@ -699,7 +699,7 @@
       }
 
       .error-message.is-note {
-        color: rgb(255 255 255 / 38%);
+        color: #8f9baa;
         font-weight: 600;
       }
 
@@ -716,7 +716,7 @@
         box-shadow: 0 7px 24px rgb(0 0 0 / 24%);
       }
 
-      .mic-button[aria-pressed="true"] {
+      .mic-button[data-active="true"] {
         border-color: var(--line);
         background: var(--panel-strong);
         color: var(--text);
@@ -809,7 +809,7 @@
         margin-top: 2px;
       }
 
-      .tuning-option[aria-checked="true"] {
+      .tuning-option[aria-pressed="true"] {
         background: rgb(52 211 153 / 13%);
         color: var(--tuned);
       }
@@ -825,10 +825,14 @@
       }
 
       .settings-dialog .dialog-shell {
-        grid-template-rows: auto auto;
+        grid-template-rows: auto minmax(0, 1fr);
       }
 
       .settings-body {
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
         padding: 10px 12px 14px;
         display: grid;
         gap: 8px;
@@ -1026,6 +1030,146 @@
         }
       }
 
+      /* Short landscape view: keep the meter and a compact string map side by side. */
+      @media (max-height: 620px) and (min-width: 640px) {
+        .app-shell {
+          width: min(100%, 760px);
+        }
+
+        .tuner-main {
+          grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.2fr);
+          grid-template-rows: minmax(0, 1fr);
+          gap: 8px;
+        }
+
+        .gauge-stage {
+          height: 100%;
+        }
+
+        .headstock-stage {
+          overflow: visible;
+        }
+
+        .headstock {
+          width: min(100%, 360px);
+          height: 100%;
+          max-width: none;
+          max-height: 100%;
+          aspect-ratio: auto;
+          transform: none;
+        }
+
+        .headstock-image {
+          inset: 0 auto 0 50%;
+          width: auto;
+          height: 100%;
+          transform: translateX(-50%);
+        }
+
+        .headstock[data-type="six-inline"][data-left-handed="true"] .headstock-image,
+        .headstock[data-type="seven-inline"][data-left-handed="true"] .headstock-image {
+          transform: translateX(-50%) scaleX(-1);
+        }
+
+        .headstock-strings {
+          display: none;
+        }
+
+        .headstock .peg,
+        .headstock[data-type="seven-inline"] .peg {
+          width: 44px;
+          height: 44px;
+        }
+
+        .headstock .peg[data-side] .peg-label,
+        .headstock[data-type="seven-inline"] .peg[data-side] .peg-label {
+          inset: 0 auto auto 0 !important;
+          width: 44px;
+          height: 44px;
+          transform: none;
+          font-size: 14px;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="0"] {
+          left: 52px !important;
+          top: 25% !important;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="1"] {
+          left: 52px !important;
+          top: 50% !important;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="2"] {
+          left: 52px !important;
+          top: 75% !important;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="3"] {
+          left: calc(100% - 52px) !important;
+          top: 75% !important;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="4"] {
+          left: calc(100% - 52px) !important;
+          top: 50% !important;
+        }
+
+        .headstock:is([data-type="three-three"], [data-type="six-inline"]) .peg[data-i="5"] {
+          left: calc(100% - 52px) !important;
+          top: 25% !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="0"] {
+          left: 52px !important;
+          top: 24px !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="1"] {
+          left: 52px !important;
+          top: 35% !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="2"] {
+          left: 52px !important;
+          top: 65% !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="3"] {
+          left: 52px !important;
+          top: calc(100% - 24px) !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="4"] {
+          left: calc(100% - 52px) !important;
+          top: 75% !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="5"] {
+          left: calc(100% - 52px) !important;
+          top: 50% !important;
+        }
+
+        .headstock:is([data-type="seven"], [data-type="seven-inline"]) .peg[data-i="6"] {
+          left: calc(100% - 52px) !important;
+          top: 25% !important;
+        }
+
+        .headstock[data-left-handed="true"]:is([data-type="three-three"], [data-type="six-inline"])
+          .peg:is([data-i="0"], [data-i="1"], [data-i="2"]),
+        .headstock[data-left-handed="true"]:is([data-type="seven"], [data-type="seven-inline"])
+          .peg:is([data-i="0"], [data-i="1"], [data-i="2"], [data-i="3"]) {
+          left: calc(100% - 52px) !important;
+        }
+
+        .headstock[data-left-handed="true"]:is([data-type="three-three"], [data-type="six-inline"])
+          .peg:is([data-i="3"], [data-i="4"], [data-i="5"]),
+        .headstock[data-left-handed="true"]:is([data-type="seven"], [data-type="seven-inline"])
+          .peg:is([data-i="4"], [data-i="5"], [data-i="6"]) {
+          left: 52px !important;
+        }
+      }
+
       @media (max-width: 350px) {
         .app-header {
           gap: 6px;
@@ -1204,7 +1348,7 @@
           </span>
           <p id="errorMessage" class="error-message" role="alert" aria-live="assertive"></p>
         </div>
-        <button id="micButton" class="mic-button" type="button" aria-pressed="false">
+        <button id="micButton" class="mic-button" type="button" data-active="false">
           チューニング開始
         </button>
       </footer>

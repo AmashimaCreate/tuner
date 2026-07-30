@@ -2434,8 +2434,7 @@ function renderTuningPicker() {
       option.type = "button";
       option.className = "tuning-option";
       option.dataset.tuningId = tuning.id;
-      option.setAttribute("role", "radio");
-      option.setAttribute("aria-checked", "false");
+      option.setAttribute("aria-pressed", "false");
       label.textContent = tuning.name;
       check.className = "tuning-check";
       check.setAttribute("aria-hidden", "true");
@@ -2452,7 +2451,7 @@ function renderTuningPicker() {
 function updateTuningPickerSelection() {
   for (const option of elements.tuningList.querySelectorAll(".tuning-option")) {
     const selected = option.dataset.tuningId === currentTuning.id;
-    option.setAttribute("aria-checked", String(selected));
+    option.setAttribute("aria-pressed", String(selected));
     option.querySelector(".tuning-check").textContent = selected ? "✓" : "";
   }
 }
@@ -2465,6 +2464,13 @@ function openTuningDialog() {
     elements.tuningDialog.showModal();
   } else {
     elements.tuningDialog.setAttribute("open", "");
+  }
+  const selectedOption = elements.tuningList.querySelector(
+    '.tuning-option[aria-pressed="true"]',
+  );
+  if (selectedOption) {
+    selectedOption.scrollIntoView({ block: "center", inline: "nearest" });
+    selectedOption.focus({ preventScroll: true });
   }
 }
 
@@ -2888,7 +2894,7 @@ function setButtonPending(pending) {
 function setButtonActive(active) {
   elements.micButton.disabled = false;
   elements.micButton.removeAttribute("aria-busy");
-  elements.micButton.setAttribute("aria-pressed", String(active));
+  elements.micButton.dataset.active = String(active);
   elements.micButton.textContent = active ? "チューニング停止" : "チューニング開始";
   elements.inputLevel.hidden = !active;
   if (!active) elements.inputLevelFill.style.transform = "scaleX(0)";

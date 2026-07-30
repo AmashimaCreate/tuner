@@ -22,6 +22,11 @@ const results = {
   releaseReacquire: null,
   unmatchedSwitch: null,
   chime: null,
+  landscapeLayouts: [],
+  settingsDialogLandscape: null,
+  tuningDialogKeyboard: null,
+  microphoneButtonSemantics: null,
+  microphoneStatusLayout: null,
 };
 
 try {
@@ -266,8 +271,19 @@ try {
       frequency: d3,
       start: false,
     });
+    const inactiveButton = await readMicrophoneButton(fixture.page);
+    assert.equal(inactiveButton.ariaPressed, null, "start button must not claim toggle semantics");
+    assert.equal(inactiveButton.active, "false");
+    assert.equal(inactiveButton.label, "チューニング開始");
     await fixture.page.locator('.peg[data-i="0"]').click();
     await fixture.page.locator("#micButton").click();
+    await fixture.page.waitForFunction(
+      () => document.querySelector("#micButton").textContent === "チューニング停止",
+    );
+    const activeButton = await readMicrophoneButton(fixture.page);
+    assert.equal(activeButton.ariaPressed, null, "stop button must not claim toggle semantics");
+    assert.equal(activeButton.active, "true");
+    assert.equal(activeButton.label, "チューニング停止");
     const state = await waitForPreset(fixture.page, {
       peg: 0,
       note: "E2",
@@ -277,6 +293,7 @@ try {
     });
     assert.equal(state.manualPeg, "0");
     assert.equal(state.activePeg, "0");
+    results.microphoneButtonSemantics = { inactiveButton, activeButton };
     results.manual = state;
     await fixture.context.close();
   }
@@ -289,6 +306,226 @@ try {
     assert.equal(state.scrollHeight, state.viewportHeight, "375px layout must not scroll");
     results.chromatic = state;
     await fixture.context.close();
+  }
+
+  for (const layoutCase of [
+    { width: 844, height: 390, headstockType: "six-inline", leftHanded: false },
+    { width: 667, height: 375, headstockType: "three-three", leftHanded: true },
+    { width: 640, height: 360, headstockType: "six-inline", leftHanded: false },
+  ]) {
+    const context = await browser.newContext({
+      viewport: { width: layoutCase.width, height: layoutCase.height },
+    });
+    await context.addInitScript(({ headstockType, leftHanded }) => {
+      localStorage.setItem("tuner.settings", JSON.stringify({
+        tuningId: "sevenStandard",
+        soundEnabled: false,
+        concertAHz: 440,
+        headstockType,
+        leftHanded,
+      }));
+    }, layoutCase);
+    const page = await context.newPage();
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    const layout = await page.evaluate(() => {
+      const stage = document.querySelector(".headstock-stage").getBoundingClientRect();
+      const labels = [...document.querySelectorAll(".peg:not([hidden]) .peg-label")].map((label) => {
+        const bounds = label.getBoundingClientRect();
+        return {
+          note: label.textContent,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          bottom: bounds.bottom,
+          insideStage:
+            bounds.left >= stage.left &&
+            bounds.right <= stage.right &&
+            bounds.top >= stage.top &&
+            bounds.bottom <= stage.bottom,
+        };
+      });
+      return {
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        scrollWidth: document.documentElement.scrollWidth,
+        scrollHeight: document.documentElement.scrollHeight,
+        labels,
+      };
+    });
+    assert.equal(layout.labels.length, 7, "seven-string landscape must show seven labels");
+    assert.ok(layout.labels.every((label) => label.insideStage), "every label must fit inside the headstock stage");
+    assert.equal(layout.scrollWidth, layout.viewportWidth, "landscape layout must not scroll horizontally");
+    assert.equal(layout.scrollHeight, layout.viewportHeight, "landscape layout must not scroll vertically");
+    results.landscapeLayouts.push(layout);
+    await context.close();
+  }
+
+  {
+    const context = await browser.newContext({ viewport: { width: 640, height: 360 } });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.click("#settings-open");
+    const layout = await page.evaluate(() => {
+      const dialog = document.querySelector("#settings-sheet");
+      const header = dialog.querySelector(".dialog-header");
+      const body = dialog.querySelector(".settings-body");
+      const link = dialog.querySelector(".settings-link");
+      const dialogBounds = dialog.getBoundingClientRect();
+      const headerTop = header.getBoundingClientRect().top;
+
+      body.scrollTop = body.scrollHeight;
+
+      const linkBounds = link.getBoundingClientRect();
+      return {
+        open: dialog.open,
+        bodyClientHeight: body.clientHeight,
+        bodyScrollHeight: body.scrollHeight,
+        bodyScrollTop: body.scrollTop,
+        headerStayedFixed: header.getBoundingClientRect().top === headerTop,
+        lastControlInsideDialog:
+          linkBounds.top >= dialogBounds.top &&
+          linkBounds.bottom <= dialogBounds.bottom,
+        pageScrollWidth: document.documentElement.scrollWidth,
+        pageScrollHeight: document.documentElement.scrollHeight,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      };
+    });
+    assert.equal(layout.open, true, "settings dialog must open");
+    assert.ok(
+      layout.bodyScrollHeight > layout.bodyClientHeight,
+      "short landscape settings must scroll inside the dialog",
+    );
+    assert.ok(layout.bodyScrollTop > 0, "settings body must accept scrolling");
+    assert.equal(layout.headerStayedFixed, true, "settings header must stay fixed");
+    assert.equal(layout.lastControlInsideDialog, true, "last settings control must be reachable");
+    assert.equal(layout.pageScrollWidth, layout.viewportWidth, "settings must not scroll the page horizontally");
+    assert.equal(layout.pageScrollHeight, layout.viewportHeight, "settings must not scroll the page vertically");
+    results.settingsDialogLandscape = layout;
+    await context.close();
+  }
+
+  {
+    const context = await browser.newContext({ viewport: { width: 320, height: 568 } });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    const layout = await page.evaluate(() => {
+      const message = document.querySelector("#errorMessage");
+      message.className = "error-message is-note";
+      message.textContent =
+        "Bluetoothマイクは通話品質になります。端末の内蔵マイクへ切り替えて、もう一度お試しください";
+      const style = getComputedStyle(message);
+      const bounds = message.getBoundingClientRect();
+      const lineHeight = Number.parseFloat(style.lineHeight);
+      const parseRgb = (value) => value.match(/\d+(?:\.\d+)?/g).slice(0, 3).map(Number);
+      const luminance = (rgb) => {
+        const [red, green, blue] = rgb.map((channel) => {
+          const value = channel / 255;
+          return value <= 0.04045
+            ? value / 12.92
+            : ((value + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      };
+      const foreground = luminance(parseRgb(style.color));
+      const background = luminance(parseRgb(getComputedStyle(document.body).backgroundColor));
+      const contrast =
+        (Math.max(foreground, background) + 0.05) /
+        (Math.min(foreground, background) + 0.05);
+
+      return {
+        lineCount: Math.round(bounds.height / lineHeight),
+        fullyVisible:
+          message.scrollWidth <= message.clientWidth &&
+          message.scrollHeight <= message.clientHeight,
+        contrast,
+        whiteSpace: style.whiteSpace,
+        pageScrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      };
+    });
+    assert.ok(layout.lineCount >= 2, "long microphone status must wrap on a narrow screen");
+    assert.equal(layout.fullyVisible, true, "microphone status must not be clipped");
+    assert.ok(layout.contrast >= 4.5, `microphone status contrast too low: ${layout.contrast}`);
+    assert.equal(layout.whiteSpace, "normal");
+    assert.equal(layout.pageScrollWidth, layout.viewportWidth, "wrapped status must not widen the page");
+    results.microphoneStatusLayout = layout;
+    await context.close();
+  }
+
+  {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.click("#tuningButton");
+
+    const semantics = await page.evaluate(() => {
+      const options = [...document.querySelectorAll(".tuning-option")];
+      return {
+        optionCount: options.length,
+        selectedCount: options.filter((option) => option.getAttribute("aria-pressed") === "true").length,
+        radioRoleCount: options.filter((option) => option.getAttribute("role") === "radio").length,
+        legacyCheckedCount: options.filter((option) => option.hasAttribute("aria-checked")).length,
+      };
+    });
+    assert.ok(semantics.optionCount > 1, "tuning dialog must contain multiple options");
+    assert.equal(semantics.selectedCount, 1, "one tuning button must expose its selected state");
+    assert.equal(semantics.radioRoleCount, 0, "plain buttons must not claim radio keyboard semantics");
+    assert.equal(semantics.legacyCheckedCount, 0, "tuning buttons must not expose aria-checked");
+
+    const lastOption = page.locator(".tuning-option").last();
+    const persistedName = (await lastOption.locator("span").first().textContent()).trim();
+    await lastOption.click();
+    await page.reload({ waitUntil: "networkidle" });
+    await page.click("#tuningButton");
+    await page.waitForFunction(
+      () => document.activeElement?.matches('.tuning-option[aria-pressed="true"]'),
+    );
+    const persistedSelection = await page.evaluate(() => {
+      const list = document.querySelector("#tuningList").getBoundingClientRect();
+      const selected = document.querySelector('.tuning-option[aria-pressed="true"]');
+      const bounds = selected.getBoundingClientRect();
+      return {
+        name: selected.querySelector("span").textContent,
+        focused: document.activeElement === selected,
+        visible: bounds.top >= list.top && bounds.bottom <= list.bottom,
+      };
+    });
+    assert.equal(persistedSelection.name, persistedName, "saved tuning must remain selected");
+    assert.equal(persistedSelection.focused, true, "saved tuning must receive focus when the dialog opens");
+    assert.equal(persistedSelection.visible, true, "saved tuning must be visible when the dialog opens");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#tuningDialog").open);
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "tuningButton",
+      "Escape must return focus to the dialog opener",
+    );
+
+    await page.click("#tuningButton");
+    const target = page.locator(".tuning-option").nth(1);
+    const targetName = (await target.locator("span").first().textContent()).trim();
+    await target.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => !document.querySelector("#tuningDialog").open);
+    const keyboardResult = await page.evaluate(() => ({
+      activeElement: document.activeElement?.id ?? "",
+      tuningName: document.querySelector("#tuningButtonName").textContent,
+      expanded: document.querySelector("#tuningButton").getAttribute("aria-expanded"),
+    }));
+    assert.equal(keyboardResult.activeElement, "tuningButton", "focus must return to the dialog opener");
+    assert.equal(keyboardResult.tuningName, targetName, "Enter must select the focused tuning");
+    assert.equal(keyboardResult.expanded, "false", "the tuning dialog must report its closed state");
+    results.tuningDialogKeyboard = {
+      ...semantics,
+      persistedSelection,
+      ...keyboardResult,
+    };
+    await context.close();
   }
 
   {
@@ -488,6 +725,14 @@ async function setFrequency(page, frequency) {
     window.__inputTargetFrequency = hz;
     oscillator.frequency.setValueAtTime(hz, inputContext.currentTime);
   }, frequency);
+}
+
+async function readMicrophoneButton(page) {
+  return page.locator("#micButton").evaluate((button) => ({
+    ariaPressed: button.getAttribute("aria-pressed"),
+    active: button.dataset.active,
+    label: button.textContent.trim(),
+  }));
 }
 
 async function setInputGain(page, value) {
