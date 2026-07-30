@@ -212,6 +212,10 @@ const CONFIG = {
   // still stuck after 10 s. Long enough that answering a real prompt is never
   // cut short.
   microphoneRequestTimeoutMs: 30000,
+  // How long after an attack the note still counts as attacking. The
+  // analyzer's low-string hold relaxation is withheld until this has passed,
+  // so plucking is judged exactly as it was before that relaxation existed.
+  attackWindowMs: 250,
   // ...or the pitch simply held steady this long (this many frames within
   // 60 cents), which is how a quiet pluck with no level jump gets in.
   sustainedPitchMs: 400,
@@ -1009,10 +1013,11 @@ function analyseFrame(now) {
       pitchTracker.state === PITCH_TRACKER_STATES.RELEASE
         ? pitchTracker.valueHz
         : null;
+    const pastAttack = now - lastOnsetAt > CONFIG.attackWindowMs;
     let { hz: rawHz, clarity, folded } = pitchAnalyzer.analyze(
       waveformBuffer,
       audioContext.sampleRate,
-      { referenceHz },
+      { referenceHz, pastAttack },
     );
 
     // Harmonic-ladder rescue. Bluetooth/phone mics high-pass the low E so hard
@@ -1050,7 +1055,7 @@ function analyseFrame(now) {
         const rescue = fineAnalyzer.analyze(
           refineBuffer,
           audioContext.sampleRate,
-          { referenceHz: combBest },
+          { referenceHz: combBest, pastAttack },
         );
         if (
           Number.isFinite(rescue.hz) &&
@@ -1070,7 +1075,7 @@ function analyseFrame(now) {
       refinedHz = fineAnalyzer.analyze(
         refineBuffer,
         audioContext.sampleRate,
-        { referenceHz },
+        { referenceHz, pastAttack },
       ).hz;
       if (Number.isFinite(refinedHz)) {
         lastRefinedHz = refinedHz;
